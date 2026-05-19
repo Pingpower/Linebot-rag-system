@@ -182,6 +182,9 @@ def save_messages(company_id: str, user_id: str, user_msg: str, ai_msg: str):
 
 def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_reply: str, logo_url: str = None):
     """回覆 LINE 訊息，優先使用精美設計的 Flex Message，支援 [FLEX_CARD] 解析與自訂 Logo"""
+    if not ai_reply or not ai_reply.strip():
+        ai_reply = "抱歉，我目前無法回答這個問題。"
+        
     try:
         messages = []
         has_card = False
@@ -657,9 +660,26 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
             model="local-model",
             messages=messages,
             temperature=0.3, # lower temperature for factual RAG matching
-            max_tokens=800
+            max_tokens=2048  # Increased to allow thought trace + answer
         )
         ai_reply = resp.choices[0].message.content
+        
+        # Defensive check: if the main content is empty, try to get reasoning_content
+        if not ai_reply or not ai_reply.strip():
+            msg_obj = resp.choices[0].message
+            reasoning = getattr(msg_obj, 'reasoning_content', None)
+            if not reasoning and hasattr(msg_obj, 'model_extra') and msg_obj.model_extra:
+                reasoning = msg_obj.model_extra.get('reasoning_content')
+            if not reasoning:
+                try:
+                    reasoning = msg_obj.get('reasoning_content')
+                except:
+                    pass
+            
+            if reasoning and reasoning.strip():
+                ai_reply = f"[思考過程]\n{reasoning.strip()}"
+            else:
+                ai_reply = "抱歉，在我的知識庫中找不到與此問題相關的資訊。"
     except Exception as e:
         logger.error({"msg": "LLM request failed", "error": str(e)})
         ai_reply = "抱歉，AI 服務暫時無法使用，請稍後再試。"
