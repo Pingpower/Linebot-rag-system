@@ -974,8 +974,8 @@ def models_explore():
 @login_required
 def api_models_search():
     query = request.args.get('q', '').strip()
-    # 預設拉取下載量前 15 名的 GGUF 模型
-    url = "https://huggingface.co/api/models?sort=downloads&direction=-1&limit=15&filter=gguf"
+    # 擴大拉取數量至 60 名以供後端過濾，確保最終展示優質模型
+    url = "https://huggingface.co/api/models?sort=downloads&direction=-1&limit=60&filter=gguf"
     if query:
         url += f"&search={query}"
         
@@ -990,9 +990,25 @@ def api_models_search():
             downloads = m.get('downloads', 0)
             likes = m.get('likes', 0)
             
-            # 判斷是否適合這台 GTX 1060 6GB 顯卡 (3B, 7B, 8B 等較小引數模型)
+            # 1. 排除過於陳舊的模型 (只保留 2024 年之後更新的活躍模型)
+            last_modified_str = m.get('lastModified')
+            if last_modified_str:
+                try:
+                    dt = datetime.strptime(last_modified_str[:10], "%Y-%m-%d")
+                    if dt.year < 2024:
+                        continue  # 排除 2024 年之前的過時模型
+                except Exception:
+                    pass
+            
+            # 2. 排除本機(GTX 1060 6GB/16GB RAM)完全無法負擔的超大模型 (如 >=30B)
+            model_id_lower = model_id.lower()
+            unsuitable_patterns = ['30b', '70b', '120b', '405b', '103b', '72b', '110b', '180b']
+            if any(p in model_id_lower for p in unsuitable_patterns):
+                continue
+                
+            # 3. 標註適合這台 6GB 顯卡執行的主流尺寸 (0.5B ~ 14B)
             # 6GB VRAM 最合適的為 1.5B/3B, 7B/8B 是極限 (需 Q4 量化且可能需 offload 記憶體)
-            suitable = any(x in model_id.lower() for x in ['1.5b', '3b', '7b', '8b', 'gemma-3-1b'])
+            suitable = any(x in model_id_lower for x in ['0.5b', '1.5b', '3b', '7b', '8b', '9b', '14b', 'gemma-3-1b'])
             
             processed_models.append({
                 'id': model_id,
@@ -1000,6 +1016,11 @@ def api_models_search():
                 'likes': likes,
                 'suitable': suitable
             })
+            
+            # 最多只回傳前 25 個精選模型以防頁面過長
+            if len(processed_models) >= 25:
+                break
+                
         return jsonify(processed_models)
     except Exception as e:
         logger.error(f"Search Hugging Face models failed: {e}")
