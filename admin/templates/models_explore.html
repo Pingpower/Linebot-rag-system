@@ -677,9 +677,7 @@
           }
           
           grid.innerHTML = data.map(m => {
-              const suitableBadge = m.suitable 
-                  ? `<span class="badge" style="background: rgba(34, 197, 94, 0.15); color: var(--success);">適合本機 (6GB)</span>`
-                  : `<span class="badge" style="background: rgba(245, 158, 11, 0.15); color: var(--warn);">容量較大 (恐顯存不足)</span>`;
+              const suitableBadge = `<span class="badge" style="background: rgba(34, 197, 94, 0.15); color: var(--success);">適合本機 (6GB)</span>`;
               
               return `
                   <div class="hf-card">

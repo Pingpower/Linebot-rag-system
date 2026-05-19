@@ -974,8 +974,8 @@ def models_explore():
 @login_required
 def api_models_search():
     query = request.args.get('q', '').strip()
-    # 擴大拉取數量至 60 名以供後端過濾，並使用 full=true 取得更新時間與檔案列表
-    url = "https://huggingface.co/api/models?sort=downloads&direction=-1&limit=60&filter=gguf&full=true"
+    # 擴大拉取數量至 100 名以供後端過濾，並使用 full=true 取得更新時間與檔案列表
+    url = "https://huggingface.co/api/models?sort=downloads&direction=-1&limit=100&filter=gguf&full=true"
     if query:
         url += f"&search={query}"
         
@@ -992,7 +992,7 @@ def api_models_search():
             
             # 1. 排除過於陳舊的模型 (只保留 2024 年之後更新的活躍模型)
             last_modified_str = m.get('lastModified')
-            updated_at = "未知"
+            updated_at = "1970-01-01"
             if last_modified_str:
                 try:
                     dt = datetime.strptime(last_modified_str[:10], "%Y-%m-%d")
@@ -1014,24 +1014,26 @@ def api_models_search():
             if gguf_count == 0:
                 continue
                 
-            # 3. 標註適合這台 6GB 顯卡執行的主流尺寸 (0.5B ~ 14B)
+            # 3. 標註並過濾適合這台 6GB 顯卡執行的主流尺寸 (0.5B ~ 14B)
             # 6GB VRAM 最合適的為 1.5B/3B, 7B/8B 是極限 (需 Q4 量化且可能需 offload 記憶體)
             suitable = any(x in model_id_lower for x in ['0.5b', '1.5b', '3b', '7b', '8b', '9b', '14b', 'gemma-3-1b'])
+            if not suitable:
+                continue  # 不適合的模型直接排除，不呈現於搜尋結果
             
             processed_models.append({
                 'id': model_id,
                 'downloads': downloads,
                 'likes': likes,
-                'suitable': suitable,
+                'suitable': True,
                 'updated_at': updated_at,
                 'gguf_count': gguf_count
             })
             
-            # 最多只回傳前 25 個精選模型以防頁面過長
-            if len(processed_models) >= 25:
-                break
-                
-        return jsonify(processed_models)
+        # 4. 根據日期由最新排在最前面 (updated_at 降序)
+        processed_models.sort(key=lambda x: x['updated_at'], reverse=True)
+            
+        # 最多只回傳前 25 個精選模型以防頁面過長
+        return jsonify(processed_models[:25])
     except Exception as e:
         logger.error(f"Search Hugging Face models failed: {e}")
         return jsonify({'error': str(e)}), 500
