@@ -1377,6 +1377,13 @@ def api_models_switch():
         service_path = os.path.join(user_systemd, "linebot-llama.service")
         
         def write_service_file(m_path, t, g, c):
+            extra_args = []
+            m_path_lower = m_path.lower()
+            if "moe" in m_path_lower or "a3b" in m_path_lower or "mixtral" in m_path_lower or "dbrx" in m_path_lower:
+                extra_args.append("--cpu-moe")
+            extra_args.append("--no-mmap")
+            extra_str = " ".join(extra_args)
+            
             content = f"""[Unit]
 Description=LINE Bot LLaMA Server
 After=network.target
@@ -1392,6 +1399,7 @@ ExecStart=/home/pipadmin/文件/llama.cpp/build/bin/llama-server \\
     --n-gpu-layers {g} \\
     --threads {t} \\
     --parallel 2 \\
+    {extra_str} \\
     --log-disable
 Restart=always
 RestartSec=10
@@ -1542,6 +1550,13 @@ def api_models_config():
                     service_path = os.path.join(user_systemd, "linebot-llama.service")
                     
                     def write_service_file(m_path, t, g, c):
+                        extra_args = []
+                        m_path_lower = m_path.lower()
+                        if "moe" in m_path_lower or "a3b" in m_path_lower or "mixtral" in m_path_lower or "dbrx" in m_path_lower:
+                            extra_args.append("--cpu-moe")
+                        extra_args.append("--no-mmap")
+                        extra_str = " ".join(extra_args)
+                        
                         content = f"""[Unit]
 Description=LINE Bot LLaMA Server
 After=network.target
@@ -1557,6 +1572,7 @@ ExecStart=/home/pipadmin/文件/llama.cpp/build/bin/llama-server \\
     --n-gpu-layers {g} \\
     --threads {t} \\
     --parallel 2 \\
+    {extra_str} \\
     --log-disable
 Restart=always
 RestartSec=10
