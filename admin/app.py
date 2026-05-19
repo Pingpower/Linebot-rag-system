@@ -974,8 +974,8 @@ def models_explore():
 @login_required
 def api_models_search():
     query = request.args.get('q', '').strip()
-    # 擴大拉取數量至 60 名以供後端過濾，確保最終展示優質模型
-    url = "https://huggingface.co/api/models?sort=downloads&direction=-1&limit=60&filter=gguf"
+    # 擴大拉取數量至 60 名以供後端過濾，並使用 full=true 取得更新時間與檔案列表
+    url = "https://huggingface.co/api/models?sort=downloads&direction=-1&limit=60&filter=gguf&full=true"
     if query:
         url += f"&search={query}"
         
@@ -992,11 +992,13 @@ def api_models_search():
             
             # 1. 排除過於陳舊的模型 (只保留 2024 年之後更新的活躍模型)
             last_modified_str = m.get('lastModified')
+            updated_at = "未知"
             if last_modified_str:
                 try:
                     dt = datetime.strptime(last_modified_str[:10], "%Y-%m-%d")
                     if dt.year < 2024:
                         continue  # 排除 2024 年之前的過時模型
+                    updated_at = dt.strftime("%Y-%m-%d")
                 except Exception:
                     pass
             
@@ -1004,6 +1006,12 @@ def api_models_search():
             model_id_lower = model_id.lower()
             unsuitable_patterns = ['30b', '70b', '120b', '405b', '103b', '72b', '110b', '180b']
             if any(p in model_id_lower for p in unsuitable_patterns):
+                continue
+                
+            # 計算該 Repository 內的 GGUF 檔案數量，若無 GGUF 檔則過濾
+            siblings = m.get('siblings', [])
+            gguf_count = sum(1 for s in siblings if s.get('rfilename', '').endswith('.gguf'))
+            if gguf_count == 0:
                 continue
                 
             # 3. 標註適合這台 6GB 顯卡執行的主流尺寸 (0.5B ~ 14B)
@@ -1014,7 +1022,9 @@ def api_models_search():
                 'id': model_id,
                 'downloads': downloads,
                 'likes': likes,
-                'suitable': suitable
+                'suitable': suitable,
+                'updated_at': updated_at,
+                'gguf_count': gguf_count
             })
             
             # 最多只回傳前 25 個精選模型以防頁面過長
