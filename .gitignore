@@ -1,0 +1,35 @@
+# Python env and cache
+venv/
+hf_env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Keys and local configs
+.env
+selected_model
+.config/
+
+# Models and binaries
+models/
+cloudflared
+
+# Logs and temporary files
+*.log
+download_log.txt
+uploads/
+
+# Backups and outputs
+output/
+*.tar.gz
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+.gemini/

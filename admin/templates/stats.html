@@ -1,0 +1,64 @@
+{% extends 'base.html' %}
+{% block title %}使用統計{% endblock %}
+{% block page_title %}使用統計{% endblock %}
+{% block content %}
+<div class="card mb-4">
+  <div class="card-header"><h2 class="card-title">選擇公司</h2></div>
+  <div style="padding:1rem 1.5rem">
+    <form method="GET" class="inline-form">
+      <select name="company_id" onchange="this.form.submit()">
+        {% for c in companies %}
+        <option value="{{ c.id }}" {% if selected and selected.id == c.id %}selected{% endif %}>
+          {{ c.name }}
+        </option>
+        {% endfor %}
+      </select>
+    </form>
+  </div>
+</div>
+
+{% if selected %}
+<div class="card">
+  <div class="card-header">
+    <h2 class="card-title">{{ selected.name }} — 近 7 天訊息量</h2>
+  </div>
+  <div style="padding:1.5rem">
+    <canvas id="chart" height="100"></canvas>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+{% if selected %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+(async () => {
+  const r = await fetch('/api/stats/{{ selected.id }}');
+  const data = await r.json();
+  new Chart(document.getElementById('chart'), {
+    type: 'line',
+    data: {
+      labels: data.map(d => d.date),
+      datasets: [{
+        label: '訊息數',
+        data: data.map(d => d.count),
+        borderColor: '#6366f1',
+        backgroundColor: 'rgba(99,102,241,0.1)',
+        tension: 0.4,
+        fill: true,
+        pointRadius: 5,
+        pointBackgroundColor: '#6366f1',
+      }]
+    },
+    options: {
+      plugins: { legend: { labels: { color: '#cbd5e1' } } },
+      scales: {
+        x: { ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } },
+        y: { ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' }, beginAtZero: true }
+      }
+    }
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}

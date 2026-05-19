@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block title %}登入 — LINE Bot 後台{% endblock %}
+{% block body %}
+<div class="login-page">
+  <div class="login-card">
+    <div class="login-logo">🤖</div>
+    <h2 class="login-title">LINE Bot 管理後台</h2>
+    <p class="login-sub">請輸入管理員帳號密碼</p>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for cat, msg in messages %}
+        <div class="alert alert-{{ cat }}">{{ msg }}</div>
+      {% endfor %}
+    {% endwith %}
+    <form method="POST" class="login-form">
+      <div class="form-group">
+        <label>帳號</label>
+        <input type="text" name="username" id="username" placeholder="admin" required autofocus>
+      </div>
+      <div class="form-group">
+        <label>密碼</label>
+        <input type="password" name="password" id="password" placeholder="••••••••" required>
+      </div>
+      <button type="submit" class="btn btn-primary btn-full">登入</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

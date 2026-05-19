@@ -1,0 +1,83 @@
+{% extends 'base.html' %}
+{% block title %}公司管理{% endblock %}
+{% block page_title %}公司管理{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h2 class="card-title">所有公司（{{ companies|length }}）</h2>
+    <a href="{{ url_for('company_new') }}" class="btn btn-primary">＋ 新增公司</a>
+  </div>
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>公司名稱</th>
+          <th>Slug</th>
+          <th>方案</th>
+          <th>本月用量</th>
+          <th>到期日</th>
+          <th>狀態</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in companies %}
+        <tr id="row-{{ c.id }}">
+          <td>
+            <strong>{{ c.name }}</strong><br>
+            <small class="text-muted">建立：{{ c.created_at[:10] }}</small>
+          </td>
+          <td>
+            <code>/callback/{{ c.slug }}</code>
+            <button class="btn-copy" onclick="navigator.clipboard.writeText('https://lmbot.pingpower.com.tw/callback/{{ c.slug }}')" title="複製 Webhook URL">📋</button>
+          </td>
+          <td>
+            <span class="badge" style="background:{{ c.plan_info.color }}20;color:{{ c.plan_info.color }};border:1px solid {{ c.plan_info.color }}40">
+              {{ c.plan_info.label }}
+            </span>
+          </td>
+          <td>
+            <div class="usage-bar-wrap">
+              <div class="usage-bar {% if c.month_usage >= c.max_messages_per_month %}danger{% elif c.month_usage >= c.max_messages_per_month * 0.8 %}warn{% endif %}"
+                   style="width:{{ [c.month_usage / c.max_messages_per_month * 100, 100] | min | round }}%">
+              </div>
+            </div>
+            <small>{{ c.month_usage }} / {{ c.max_messages_per_month }}</small>
+          </td>
+          <td>
+            {% if c.expires_at %}
+              <span class="{% if c.is_expired %}text-red{% endif %}">{{ c.expires_at[:10] }}</span>
+            {% else %}<span class="text-muted">永久</span>{% endif %}
+          </td>
+          <td>
+            <button class="toggle-btn {% if c.is_active and not c.is_expired %}active{% endif %}"
+                    data-id="{{ c.id }}" onclick="toggleCompany('{{ c.id }}', this)">
+              {{ '啟用' if c.is_active and not c.is_expired else '停用' }}
+            </button>
+          </td>
+          <td class="actions">
+            <a href="{{ url_for('company_edit', company_id=c.id) }}" class="btn btn-sm btn-outline">✏️ 編輯</a>
+            <form method="POST" action="{{ url_for('company_delete', company_id=c.id) }}"
+                  onsubmit="return confirm('確定要刪除「{{ c.name }}」？此操作不可復原！')">
+              <button class="btn btn-sm btn-danger">🗑️ 刪除</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="text-center text-muted py-8">尚無公司，點擊右上角新增</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function toggleCompany(id, btn) {
+  const r = await fetch(`/companies/${id}/toggle`, {method: 'POST'});
+  const data = await r.json();
+  btn.textContent = data.is_active ? '啟用' : '停用';
+  btn.classList.toggle('active', data.is_active);
+}
+</script>
+{% endblock %}

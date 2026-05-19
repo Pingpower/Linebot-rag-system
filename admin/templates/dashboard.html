@@ -1,0 +1,172 @@
+{% extends 'base.html' %}
+{% block title %}總覽 — LINE Bot 後台{% endblock %}
+{% block page_title %}總覽 Dashboard{% endblock %}
+{% block content %}
+
+<!-- Stats Cards -->
+<div class="stats-grid">
+  <div class="stat-card">
+    <div class="stat-icon" style="background:#1d4ed8">🏢</div>
+    <div class="stat-body">
+      <div class="stat-value">{{ stats.total }}</div>
+      <div class="stat-label">公司總數</div>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon" style="background:#15803d">✅</div>
+    <div class="stat-body">
+      <div class="stat-value">{{ stats.active }}</div>
+      <div class="stat-label">啟用中</div>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon" style="background:#b45309">⚠️</div>
+    <div class="stat-body">
+      <div class="stat-value">{{ stats.expiring_soon }}</div>
+      <div class="stat-label">7天內到期</div>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon" style="background:#be123c">❌</div>
+    <div class="stat-body">
+      <div class="stat-value">{{ stats.expired }}</div>
+      <div class="stat-label">已過期</div>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon" style="background:#6d28d9">💬</div>
+    <div class="stat-body">
+      <div class="stat-value">{{ stats.total_messages }}</div>
+      <div class="stat-label">本月訊息總量</div>
+    </div>
+  </div>
+</div>
+
+<!-- Server Status Card -->
+<div class="card mt-6">
+  <div class="card-header">
+    <h2 class="card-title">伺服器狀態</h2>
+  </div>
+  <div class="table-wrap">
+    <table class="table">
+      <tbody>
+        <tr>
+          <td style="width: 200px;"><strong>引擎運作狀態</strong></td>
+          <td>
+            <span class="status-dot" id="server-status-dot" data-color="{{ stats.server.status_color }}"></span>
+            <strong>{{ stats.server.status }}</strong>
+          </td>
+        </tr>
+        <tr>
+          <td><strong>現用模型 (LLaMA)</strong></td>
+          <td><code>{{ stats.server.model }}</code></td>
+        </tr>
+        <tr>
+          <td><strong>系統記憶體 (RAM)</strong></td>
+          <td>{{ stats.server.ram }}</td>
+        </tr>
+        <tr>
+          <td><strong>顯示卡記憶體 (VRAM)</strong></td>
+          <td>{{ stats.server.vram }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Company Status Table -->
+<div class="card mt-6">
+  <div class="card-header">
+    <h2 class="card-title">各公司狀態</h2>
+    <a href="{{ url_for('company_new') }}" class="btn btn-primary btn-sm">＋ 新增公司</a>
+  </div>
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>公司名稱</th>
+          <th>Webhook Slug</th>
+          <th>方案</th>
+          <th>本月用量</th>
+          <th>到期日</th>
+          <th>狀態</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in companies %}
+        <tr>
+          <td><strong>{{ c.name }}</strong></td>
+          <td><code>/callback/{{ c.slug }}</code></td>
+          <td>
+            <span class="badge dynamic-badge" data-color="{{ c.plan_info.color }}">
+              {{ c.plan_info.label }}
+            </span>
+          </td>
+          <td>
+            <div class="usage-bar-wrap">
+              <div class="usage-bar" data-width="{{ [c.month_usage / c.max_messages_per_month * 100, 100] | min | round }}"></div>
+            </div>
+            <small>{{ c.month_usage }} / {{ c.max_messages_per_month }}</small>
+          </td>
+          <td>
+            {% if c.expires_at %}
+              {% if c.is_expired %}
+                <span class="text-red">{{ c.expires_at[:10] }} 已過期</span>
+              {% else %}
+                {{ c.expires_at[:10] }}
+              {% endif %}
+            {% else %}
+              <span class="text-muted">永久</span>
+            {% endif %}
+          </td>
+          <td>
+            <span class="status-dot {% if c.is_active and not c.is_expired %}green{% else %}red{% endif %}"></span>
+            {{ '啟用' if c.is_active and not c.is_expired else '停用/過期' }}
+          </td>
+          <td>
+            <a href="{{ url_for('company_edit', company_id=c.id) }}" class="btn btn-sm btn-outline">編輯</a>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="text-center text-muted">尚無公司資料</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    // 1. 設定伺服器狀態燈顏色
+    const dot = document.getElementById('server-status-dot');
+    if (dot) {
+      const color = dot.getAttribute('data-color');
+      if (color) {
+        dot.style.background = color;
+        dot.style.boxShadow = `0 0 6px ${color}`;
+      }
+    }
+
+    // 2. 設定方案 Badge 顏色
+    document.querySelectorAll('.dynamic-badge').forEach(el => {
+      const color = el.getAttribute('data-color');
+      if (color) {
+        el.style.background = `${color}20`;
+        el.style.color = color;
+        el.style.border = `1px solid ${color}40`;
+      }
+    });
+
+    // 3. 設定使用量 Progress Bar 寬度
+    document.querySelectorAll('.usage-bar[data-width]').forEach(el => {
+      const width = el.getAttribute('data-width');
+      if (width !== null) {
+        el.style.width = `${width}%`;
+      }
+    });
+  });
+</script>
+{% endblock %}

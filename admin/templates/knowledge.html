@@ -1,0 +1,639 @@
+{% extends 'base.html' %}
+{% block title %}知識庫訓練{% endblock %}
+{% block page_title %}知識庫訓練{% endblock %}
+{% block content %}
+
+<!-- Company Selector -->
+<div class="card mb-4">
+  <div class="card-header">
+    <h2 class="card-title">選擇公司</h2>
+  </div>
+  <div style="padding:1rem 1.5rem">
+    <form method="GET" class="inline-form">
+      <select name="company_id" id="company_selector" onchange="this.form.submit()">
+        <option value="">-- 選擇公司 --</option>
+        {% for c in companies %}
+        <option value="{{ c.id }}" {% if selected and selected.id == c.id %}selected{% endif %}>
+          {{ c.name }} ({{ c.slug }})
+        </option>
+        {% endfor %}
+      </select>
+    </form>
+  </div>
+</div>
+
+{% if selected %}
+
+<!-- ═══ AI 資料蒐集 (NotebookLM style) ═══════════════════════════════════════ -->
+<div class="card mb-4" id="ai-collect-card">
+  <div class="card-header" style="background:linear-gradient(135deg,#1e1b4b 0%,#312e81 100%)">
+    <h2 class="card-title" style="color:#a5b4fc">
+      🤖 AI 資料蒐集
+      <span class="badge-ai">NotebookLM 風格</span>
+    </h2>
+    <span class="text-muted text-sm">輸入網址、搜尋主題或貼入文字，AI 自動整理成知識條目</span>
+  </div>
+  <div style="padding:1.5rem">
+
+    <!-- Mode Tabs -->
+    <div class="ai-mode-tabs">
+      <button class="ai-tab active" onclick="switchMode('url',this)">🔗 網址匯入</button>
+      <button class="ai-tab" onclick="switchMode('search',this)">🔍 主題搜尋</button>
+      <button class="ai-tab" onclick="switchMode('text',this)">📋 貼入文字</button>
+      <button class="ai-tab" onclick="switchMode('file',this)">📂 檔案上傳</button>
+    </div>
+
+    <!-- URL Mode -->
+    <div id="mode-url" class="ai-mode-panel">
+      <div class="form-group">
+        <label>網址 URL</label>
+        <input type="url" id="ai-url-input" placeholder="https://example.com/about"
+               style="font-family:monospace">
+      </div>
+      <!-- Subpage Detection Block -->
+      <div id="subpage-detector-block" style="display:none; margin-top:1.5rem; padding:1.25rem; background:rgba(255,255,255,0.03); border:1px solid rgba(165,180,252,0.2); border-radius:12px">
+        <h4 style="color:#a5b4fc; margin-top:0; margin-bottom:0.5rem; font-size:0.95rem; display:flex; align-items:center; gap:0.5rem">
+          <span>🔍 偵測到目錄網頁！</span>
+          <span style="font-size:0.75rem; background:rgba(99,102,241,0.25); color:#c7d2fe; padding:0.15rem 0.5rem; border-radius:999px" id="subpage-count-badge">共 0 個子網頁</span>
+        </h4>
+        <p class="text-muted text-sm" style="margin-bottom:1rem">此頁面包含多個子項目。為了防範逾時並確保內容完整性，建議使用分段批次導入：</p>
+        
+        <div style="display:flex; gap:0.5rem; margin-bottom:1rem">
+          <button type="button" class="btn btn-outline btn-sm" onclick="toggleAllSubpages(true)">全選</button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="toggleAllSubpages(false)">取消全選</button>
+        </div>
+
+        <div id="subpage-links-list" style="max-height:220px; overflow-y:auto; padding:0.75rem; background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.08); border-radius:8px; display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:0.5rem">
+          <!-- Dynamic checkboxes -->
+        </div>
+
+        <div style="margin-top:1.25rem; display:flex; justify-content:flex-end">
+          <button type="button" class="btn btn-ai" onclick="runSubpageBatchImport()" id="subpage-batch-btn">
+            🚀 開始分段批次匯入
+          </button>
+        </div>
+      </div>
+    </div>
+
+
+    <!-- Search Mode -->
+    <div id="mode-search" class="ai-mode-panel" style="display:none">
+      <div class="form-group">
+        <label>搜尋主題（將用 DuckDuckGo 搜尋並整理）</label>
+        <input type="text" id="ai-search-input" placeholder="例：台灣電商退換貨法規、火鍋食材介紹...">
+      </div>
+    </div>
+
+    <!-- Text Mode -->
+    <div id="mode-text" class="ai-mode-panel" style="display:none">
+      <div class="form-group">
+        <label>貼入原始資料（產品說明、FAQ、規章...）</label>
+        <textarea id="ai-text-input" rows="6"
+                  placeholder="將要整理的文字貼在這裡，AI 會自動分析並拆分成知識條目..."></textarea>
+      </div>
+    </div>
+
+    <!-- File Mode -->
+    <div id="mode-file" class="ai-mode-panel" style="display:none">
+      <div class="form-group">
+        <label>上傳檔案（支援 .txt, .md, .pdf, .docx 格式，最大 10MB）</label>
+        <input type="file" id="ai-file-input" accept=".txt,.md,.pdf,.docx" style="display:block;margin-top:0.25rem;color:#e2e8f0;background:rgba(255,255,255,0.05);border:1px dashed rgba(165,180,252,0.3);padding:1rem;border-radius:8px;width:100%;cursor:pointer">
+      </div>
+    </div>
+
+    <!-- Common: Hint + Button -->
+    <div class="form-row" style="align-items:flex-end;gap:1rem;margin-top:0.5rem">
+      <div class="form-group" style="flex:1;margin-bottom:0">
+        <label>補充提示（選填，告訴 AI 你想重點萃取什麼）</label>
+        <input type="text" id="ai-hint" placeholder="例：只要關於退款和保固的資訊">
+      </div>
+      <button class="btn btn-ai" onclick="runAiCollect()" id="ai-collect-btn">
+        ✨ AI 開始整理
+      </button>
+    </div>
+
+    <!-- Progress -->
+    <div id="ai-progress" style="display:none;margin-top:1.5rem">
+      <div class="progress-bar-wrap">
+        <div class="progress-bar-fill" id="ai-progress-fill"></div>
+      </div>
+      <p id="ai-progress-msg" class="text-muted text-sm" style="margin-top:.5rem">🔄 AI 正在分析中...</p>
+    </div>
+
+    <!-- Preview Results -->
+    <div id="ai-preview" style="display:none;margin-top:1.5rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+        <h3 style="color:#a5b4fc;font-size:1rem;margin:0">📋 AI 整理結果（可編輯後儲存）</h3>
+        <div style="display:flex;gap:.5rem">
+          <button class="btn btn-outline btn-sm" onclick="clearPreview()">清除</button>
+          <button class="btn btn-ai" onclick="saveAllEntries()" id="ai-save-btn">
+            💾 全部儲存到知識庫
+          </button>
+        </div>
+      </div>
+      <div id="ai-entries-list"></div>
+    </div>
+
+  </div>
+</div>
+<!-- ═══════════════════════════════════════════════════════════════════════════ -->
+
+<!-- Add Entry Form (manual) -->
+<div class="card mb-4">
+  <div class="card-header">
+    <h2 class="card-title">手動新增條目</h2>
+    <span class="text-muted text-sm">共 {{ entries|length }} 條</span>
+  </div>
+  <form method="POST" action="{{ url_for('knowledge_add') }}" style="padding:1.5rem">
+    <input type="hidden" name="company_id" value="{{ selected.id }}">
+    <div class="form-row">
+      <div class="form-group" style="flex:1">
+        <label>標題 <span class="required">*</span></label>
+        <input type="text" name="title" id="title" required placeholder="例：退貨政策、營業時間">
+      </div>
+      <div class="form-group" style="flex:1">
+        <label>標籤（逗號分隔）</label>
+        <input type="text" name="tags" id="tags" placeholder="例：政策, 服務, FAQ">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>內容 <span class="required">*</span></label>
+      <textarea name="content" id="content" rows="5" required
+                placeholder="詳細說明此知識條目的內容...&#10;當用戶提問相關問題時，AI 會參考這段資料來回答。"></textarea>
+    </div>
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary">新增條目</button>
+    </div>
+  </form>
+</div>
+
+<!-- RAG Test -->
+<div class="card mb-4">
+  <div class="card-header">
+    <h2 class="card-title">🔍 搜尋測試</h2>
+    <span class="text-muted text-sm">測試 AI 會找到哪些知識來回答</span>
+  </div>
+  <div style="padding:1.5rem">
+    <div class="inline-form">
+      <input type="text" id="rag-query" placeholder="輸入測試問題..." style="flex:1">
+      <button class="btn btn-outline" onclick="testSearch()">搜尋</button>
+    </div>
+    <div id="rag-results" class="rag-results"></div>
+  </div>
+</div>
+
+<!-- Knowledge List -->
+<div class="card">
+  <div class="card-header">
+    <h2 class="card-title">知識條目列表</h2>
+  </div>
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>標題</th>
+          <th>內容預覽</th>
+          <th>標籤</th>
+          <th>狀態</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in entries %}
+        <tr>
+          <td><strong>{{ e.title }}</strong><br><small class="text-muted">{{ e.created_at[:10] }}</small></td>
+          <td class="content-preview">{{ e.content[:100] }}{% if e.content|length > 100 %}...{% endif %}</td>
+          <td>
+            {% for tag in (e.tags or []) %}
+              <span class="tag">{{ tag }}</span>
+            {% endfor %}
+          </td>
+          <td><span class="status-dot {% if e.is_active %}green{% else %}red{% endif %}"></span></td>
+          <td>
+            <form method="POST" action="{{ url_for('knowledge_delete', entry_id=e.id) }}"
+                  onsubmit="return confirm('確定刪除「{{ e.title }}」？')">
+              <button class="btn btn-sm btn-danger">🗑️</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="text-center text-muted py-8">尚無知識條目，請點上方新增</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<style>
+/* ── AI Collect Panel Styles ── */
+.badge-ai {
+  display: inline-block;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
+  font-size: .65rem;
+  font-weight: 600;
+  padding: .2rem .6rem;
+  border-radius: 999px;
+  margin-left: .5rem;
+  vertical-align: middle;
+}
+.ai-mode-tabs {
+  display: flex;
+  gap: .5rem;
+  margin-bottom: 1.25rem;
+  border-bottom: 1px solid rgba(255,255,255,.08);
+  padding-bottom: .75rem;
+}
+.ai-tab {
+  background: transparent;
+  border: 1px solid rgba(165,180,252,.3);
+  color: #94a3b8;
+  border-radius: 8px;
+  padding: .45rem 1rem;
+  font-size: .85rem;
+  cursor: pointer;
+  transition: all .2s;
+}
+.ai-tab.active, .ai-tab:hover {
+  background: rgba(99,102,241,.2);
+  border-color: #6366f1;
+  color: #a5b4fc;
+}
+.btn-ai {
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  color: #fff;
+  border: none;
+  padding: .6rem 1.4rem;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity .2s;
+  white-space: nowrap;
+}
+.btn-ai:hover { opacity: .88; }
+.btn-ai:disabled { opacity: .5; cursor: not-allowed; }
+.progress-bar-wrap {
+  background: rgba(255,255,255,.07);
+  border-radius: 999px;
+  height: 6px;
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #6366f1, #8b5cf6);
+  border-radius: 999px;
+  width: 0%;
+  transition: width .4s ease;
+}
+/* Entry preview card */
+.ai-entry-card {
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(165,180,252,.15);
+  border-radius: 12px;
+  padding: 1rem 1.25rem;
+  margin-bottom: .75rem;
+  position: relative;
+  transition: border-color .2s;
+}
+.ai-entry-card:hover { border-color: rgba(99,102,241,.5); }
+.ai-entry-card input[type=text],
+.ai-entry-card textarea {
+  background: rgba(255,255,255,.05);
+  border: 1px solid rgba(255,255,255,.12);
+  color: #e2e8f0;
+  border-radius: 6px;
+  padding: .45rem .75rem;
+  width: 100%;
+  font-size: .85rem;
+  margin-top: .25rem;
+}
+.ai-entry-card textarea { resize: vertical; }
+.ai-entry-label { font-size: .7rem; color: #94a3b8; font-weight: 600; text-transform: uppercase; letter-spacing:.05em; }
+.ai-entry-remove {
+  position: absolute; top: .75rem; right: .75rem;
+  background: rgba(239,68,68,.15); border: none; color: #f87171;
+  border-radius: 6px; padding: .2rem .5rem; cursor: pointer; font-size: .8rem;
+}
+.ai-entry-remove:hover { background: rgba(239,68,68,.3); }
+.subpage-item-label {
+  transition: all 0.2s ease;
+}
+.subpage-item-label:hover {
+  background: rgba(99, 102, 241, 0.12) !important;
+  border-color: rgba(99, 102, 241, 0.4) !important;
+}
+</style>
+
+<script>
+const COMPANY_ID = '{{ selected.id if selected else "" }}';
+let currentMode = 'url';
+let pendingEntries = [];
+
+function switchMode(mode, btn) {
+  currentMode = mode;
+  document.querySelectorAll('.ai-mode-panel').forEach(p => p.style.display = 'none');
+  document.querySelectorAll('.ai-tab').forEach(b => b.classList.remove('active'));
+  document.getElementById('mode-' + mode).style.display = 'block';
+  btn.classList.add('active');
+  const detector = document.getElementById('subpage-detector-block');
+  if (detector) detector.style.display = 'none';
+}
+
+async function runAiCollect() {
+  const btn = document.getElementById('ai-collect-btn');
+  const hint = document.getElementById('ai-hint').value.trim();
+
+  let body;
+  let headers = {};
+
+  if (currentMode === 'file') {
+    const fileInput = document.getElementById('ai-file-input');
+    const file = fileInput.files[0];
+    if (!file) { alert('請先選擇檔案'); return; }
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('hint', hint);
+
+    body = formData;
+  } else {
+    let source = '';
+    if (currentMode === 'url')    source = document.getElementById('ai-url-input').value.trim();
+    if (currentMode === 'search') source = document.getElementById('ai-search-input').value.trim();
+    if (currentMode === 'text')   source = document.getElementById('ai-text-input').value.trim();
+
+    if (!source) { alert('請先輸入內容'); return; }
+
+    body = JSON.stringify({ mode: currentMode, source, hint });
+    headers['Content-Type'] = 'application/json';
+  }
+
+  btn.disabled = true;
+
+  if (currentMode === 'url') {
+    showProgress('正在探測網頁結構與子項目...', 15);
+    try {
+      const detectRes = await fetch('/knowledge/ai-collect/detect-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: document.getElementById('ai-url-input').value.trim() })
+      });
+      const detectData = await detectRes.json();
+      if (detectRes.ok && detectData.is_index) {
+        hideProgress();
+        const badge = document.getElementById('subpage-count-badge');
+        badge.textContent = `共 ${detectData.links.length} 個子網頁`;
+        
+        const listDiv = document.getElementById('subpage-links-list');
+        listDiv.innerHTML = detectData.links.map(e => `
+          <label style="display:flex; align-items:flex-start; gap:0.5rem; background:rgba(255,255,255,0.02); padding:0.4rem 0.6rem; border-radius:6px; border:1px solid rgba(255,255,255,0.05); cursor:pointer; font-size:0.85rem" class="subpage-item-label">
+            <input type="checkbox" class="subpage-chk" value="${e.url}" data-text="${escHtml(e.text)}" checked style="margin-top:0.25rem">
+            <span style="color:#e2e8f0; line-height:1.3">${escHtml(e.text)}</span>
+          </label>
+        `).join('');
+        
+        document.getElementById('subpage-detector-block').style.display = 'block';
+        btn.disabled = false;
+        return;
+      }
+    } catch (detectErr) {
+      console.warn("Subpage detection failed or skipped:", detectErr);
+    }
+  }
+
+  const detector = document.getElementById('subpage-detector-block');
+  if (detector) detector.style.display = 'none';
+
+  showProgress('正在讀取與解析資料...', 15);
+
+  const progressSteps = [
+    [1500, '正在呼叫 AI 分析...', 40],
+    [4000, 'AI 正在分析萃取知識條目...', 65],
+    [9000, '即將完成...', 85],
+  ];
+  const progressTimers = progressSteps.map(([ms, msg, pct]) =>
+    setTimeout(() => showProgress(msg, pct), ms)
+  );
+
+  try {
+    const res = await fetch('/knowledge/ai-collect', {
+      method: 'POST',
+      headers: headers,
+      body: body,
+    });
+    const data = await res.json();
+
+    if (!res.ok || data.error) throw new Error(data.error || '未知錯誤');
+
+    progressTimers.forEach(t => clearTimeout(t));
+    showProgress('整理完成！', 100);
+    setTimeout(() => hideProgress(), 800);
+
+    pendingEntries = data.entries || [];
+    renderPreview(pendingEntries);
+  } catch (err) {
+    progressTimers.forEach(t => clearTimeout(t));
+    hideProgress();
+    alert('❌ 錯誤：' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function toggleAllSubpages(checked) {
+  document.querySelectorAll('.subpage-chk').forEach(chk => {
+    chk.checked = checked;
+  });
+}
+
+async function runSubpageBatchImport() {
+  const checkboxes = document.querySelectorAll('.subpage-chk:checked');
+  if (checkboxes.length === 0) {
+    alert('請至少勾選一個子網頁進行匯入');
+    return;
+  }
+
+  const selectedItems = Array.from(checkboxes).map(chk => ({
+    url: chk.value,
+    text: chk.dataset.text
+  }));
+
+  const hint = document.getElementById('ai-hint').value.trim();
+  const mainBtn = document.getElementById('ai-collect-btn');
+  const batchBtn = document.getElementById('subpage-batch-btn');
+
+  mainBtn.disabled = true;
+  batchBtn.disabled = true;
+
+  clearPreview();
+  showProgress(`準備進行分段匯入... (0/${selectedItems.length})`, 0);
+
+  let successCount = 0;
+  let failCount = 0;
+  const allEntries = [];
+
+  for (let idx = 0; idx < selectedItems.length; idx++) {
+    const item = selectedItems[idx];
+    const itemNum = idx + 1;
+    const progressPercent = Math.round((idx / selectedItems.length) * 100);
+    
+    showProgress(`正在處理 (${itemNum}/${selectedItems.length}): ${item.text}...`, progressPercent);
+    
+    try {
+      const res = await fetch('/knowledge/ai-collect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode: 'url',
+          source: item.url,
+          hint: hint
+        })
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        throw new Error(data.error || '解析失敗');
+      }
+      
+      if (data.entries && data.entries.length > 0) {
+        data.entries.forEach(entry => {
+          entry.tags = entry.tags || [];
+          if (!entry.tags.includes(item.text)) {
+            entry.tags.push(item.text);
+          }
+          allEntries.push(entry);
+        });
+        successCount++;
+      } else {
+        throw new Error('未萃取出任何有效知識');
+      }
+    } catch (err) {
+      console.error(`Item [${item.text}] failed:`, err);
+      failCount++;
+      showProgress(`⚠️ [${item.text}] 失敗：${err.message || err}，將於下一項目重試...`, progressPercent);
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+
+  showProgress(`匯入完成！成功 ${successCount} 頁，失敗 ${failCount} 頁`, 100);
+  setTimeout(() => hideProgress(), 1500);
+
+  mainBtn.disabled = false;
+  batchBtn.disabled = false;
+
+  if (allEntries.length > 0) {
+    pendingEntries = allEntries;
+    renderPreview(pendingEntries);
+  } else {
+    alert('❌ 分段匯入全部失敗，沒有取得任何條目。請確認目標網址是否可以正常被伺服器連線。');
+  }
+}
+
+function showProgress(msg, pct) {
+  document.getElementById('ai-progress').style.display = 'block';
+  document.getElementById('ai-progress-fill').style.width = pct + '%';
+  document.getElementById('ai-progress-msg').textContent = '🔄 ' + msg;
+}
+function hideProgress() {
+  document.getElementById('ai-progress').style.display = 'none';
+}
+
+function renderPreview(entries) {
+  const list = document.getElementById('ai-entries-list');
+  list.innerHTML = entries.map((e, i) => `
+    <div class="ai-entry-card" id="entry-card-${i}">
+      <button class="ai-entry-remove" onclick="removeEntry(${i})">✕ 移除</button>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem;margin-bottom:.75rem">
+        <div>
+          <div class="ai-entry-label">標題</div>
+          <input type="text" id="entry-title-${i}" value="${escHtml(e.title)}">
+        </div>
+        <div>
+          <div class="ai-entry-label">標籤（逗號分隔）</div>
+          <input type="text" id="entry-tags-${i}" value="${(e.tags||[]).join(', ')}">
+        </div>
+      </div>
+      <div>
+        <div class="ai-entry-label">內容</div>
+        <textarea id="entry-content-${i}" rows="4">${escHtml(e.content)}</textarea>
+      </div>
+    </div>
+  `).join('');
+  document.getElementById('ai-preview').style.display = 'block';
+  document.getElementById('ai-preview').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function removeEntry(i) {
+  document.getElementById('entry-card-' + i).remove();
+  pendingEntries[i] = null;
+}
+
+async function saveAllEntries() {
+  const saveBtn = document.getElementById('ai-save-btn');
+  const cards = document.querySelectorAll('.ai-entry-card');
+  const entries = [];
+  cards.forEach(card => {
+    const i = card.id.replace('entry-card-', '');
+    entries.push({
+      title:   document.getElementById('entry-title-' + i)?.value.trim() || '',
+      content: document.getElementById('entry-content-' + i)?.value.trim() || '',
+      tags:    document.getElementById('entry-tags-' + i)?.value.trim() || '',
+    });
+  });
+  if (!entries.length) { alert('沒有條目可儲存'); return; }
+
+  saveBtn.disabled = true;
+  saveBtn.textContent = '⏳ 儲存中...';
+
+  try {
+    const res = await fetch('/knowledge/ai-save', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ company_id: COMPANY_ID, entries }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      alert(`✅ 已儲存 ${data.saved} 條知識條目！`);
+      location.reload();
+    } else throw new Error(data.error);
+  } catch (err) {
+    alert('❌ 儲存失敗：' + err.message);
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = '💾 全部儲存到知識庫';
+  }
+}
+
+function clearPreview() {
+  document.getElementById('ai-preview').style.display = 'none';
+  document.getElementById('ai-entries-list').innerHTML = '';
+  pendingEntries = [];
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+/* ── RAG Test ── */
+async function testSearch() {
+  const q = document.getElementById('rag-query').value.trim();
+  const cid = '{{ selected.id if selected else "" }}';
+  if (!q) return;
+  const r = await fetch(`/knowledge/search?company_id=${cid}&q=${encodeURIComponent(q)}`);
+  const data = await r.json();
+  const el = document.getElementById('rag-results');
+  if (!data.length) {
+    el.innerHTML = '<p class="text-muted">沒有找到相關知識條目</p>';
+    return;
+  }
+  el.innerHTML = data.map(d => `
+    <div class="rag-hit">
+      <strong>${d.title}</strong>
+      <p>${d.content}</p>
+    </div>
+  `).join('');
+}
+</script>
+{% endblock %}
