@@ -1148,6 +1148,44 @@ WantedBy=default.target
         return jsonify({'error': f'切換模型失敗: {str(e)}'}), 500
 
 
+@app.route('/api/models/delete', methods=['POST'])
+@login_required
+def delete_model():
+    try:
+        data = request.get_json() or {}
+        model_name = data.get('model_name', '').strip()
+        if not model_name:
+            return jsonify({'error': '未提供模型名稱'}), 400
+            
+        # 安全性檢查
+        if '/' in model_name or '\\' in model_name or '..' in model_name:
+            return jsonify({'error': '非法檔案名稱'}), 400
+            
+        if not model_name.endswith('.gguf'):
+            return jsonify({'error': '只能刪除 .gguf 模型檔案'}), 400
+
+        # 檢查是否為當前啟用中的模型
+        current_metrics = get_server_metrics()
+        current_model = current_metrics.get('model', '無')
+        current_model_name = os.path.basename(current_model)
+        
+        if model_name == current_model_name:
+            return jsonify({'error': '無法刪除目前啟用中的模型。請先切換至其他模型後再行刪除。'}), 400
+            
+        MODELS_DIR = "/home/pipadmin/文件/models"
+        target_path = os.path.join(MODELS_DIR, model_name)
+        
+        if not os.path.exists(target_path):
+            return jsonify({'error': '模型檔案不存在'}), 404
+            
+        os.remove(target_path)
+        logger.info(f"Model deleted: {model_name}")
+        return jsonify({'ok': True, 'msg': f'模型 {model_name} 已成功刪除，釋放硬碟空間！'})
+    except Exception as e:
+        logger.error(f"Delete model failed: {e}")
+        return jsonify({'error': f'刪除失敗: {str(e)}'}), 500
+
+
 @app.route('/api/system/gpu')
 @login_required
 def api_system_gpu():

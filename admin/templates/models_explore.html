@@ -65,12 +65,13 @@
                     <span class="model-item-name">{{ m.name }}</span>
                     <span class="model-item-size">{{ m.size }}</span>
                   </div>
-                  <div class="model-item-actions">
+                  <div class="model-item-actions" style="display: flex; gap: 8px; align-items: center;">
                     {% if m.name == current_model %}
                       <span class="status-dot green"></span>
                       <span class="text-sm" style="color: var(--success); font-weight: 600;">執行中</span>
                     {% else %}
                       <button class="btn btn-primary btn-sm" onclick="switchModel('{{ m.name }}')">一鍵啟用</button>
+                      <button class="btn btn-sm" onclick="deleteModel('{{ m.name }}')" style="background: rgba(239, 68, 68, 0.1); color: var(--danger); border: 1px solid rgba(239, 68, 68, 0.2); padding: 5px 10px; border-radius: 4px; cursor: pointer;">🗑️ 刪除</button>
                     {% endif %}
                   </div>
                 </div>
@@ -575,6 +576,30 @@
       } catch (err) {
           alert("請求切換失敗，請稍後再試！");
           window.location.reload();
+      }
+  }
+
+  // 一鍵刪除模型
+  async function deleteModel(modelName) {
+      if (!confirm(`⚠️ 警告：確定要永久刪除模型檔案：\n\n${modelName}\n\n嗎？此操作將無法還原，但可釋放硬碟空間！`)) {
+          return;
+      }
+      
+      try {
+          const res = await fetch('/api/models/delete', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ model_name: modelName })
+          });
+          const data = await res.json();
+          if (data.error) {
+              alert(`刪除失敗: ${data.error}`);
+          } else {
+              alert(data.msg);
+              window.location.reload();
+          }
+      } catch (err) {
+          alert("請求刪除失敗，請稍後重試！");
       }
   }
 
