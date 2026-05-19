@@ -343,12 +343,14 @@ def search_knowledge(company_id: str, query: str, limit: int = 3) -> list[dict]:
 1. **申請 Hugging Face Token**
    - 註冊並登入 [Hugging Face](https://huggingface.co/)。
    - 前往 Settings -> Access Tokens，新增一個具有 Read 權限的 Token。
-2. **寫入環境變數**
-   - 開啟 `line_bot/.env` 或 `admin/.env`，加入以下環境變數設定：
+2. **配置金鑰 (兩種方式擇一)**
+   - **網頁直接設定 (推薦)**：登入管理後台，進入「模型市場 & AI 工具箱」，在頂部的 **「Hugging Face 雲端 API 憑證配置」** 欄位中貼上您的憑證，點擊「儲存金鑰」。後端會自動寫入設定檔，並自動重新載入 LINE Bot 服務。
+   - **手動寫入環境變數**：若您熟悉終端機操作，亦可直接開啟 `line_bot/.env` 檔案，在最尾端加入：
      ```ini
-     HF_TOKEN=your_huggingface_access_token_here
+     HF_TOKEN="your_huggingface_access_token_here"
      ```
-   - 系統後端將會自動讀取此 Token 並調用雲端 FLUX.1 (生圖) 與 SVD (生片) 模型。
+     修改完成後，在終端機執行 `systemctl --user restart linebot-flask` 重啟 LINE Bot 服務。
+
 
 ### 4.2 管理後台「模型市場」功能說明
 
