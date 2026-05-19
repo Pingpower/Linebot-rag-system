@@ -412,16 +412,48 @@ def company_toggle(company_id):
 @app.route('/knowledge')
 @login_required
 def knowledge():
+    import math
     companies = get_companies()
     selected_id = request.args.get('company_id')
+    
+    # 防呆：若未選定公司且存在公司列表，自動選擇第一家並重定向
+    if not selected_id and companies:
+        return redirect(url_for('knowledge', company_id=companies[0]['id']))
+        
+    q = request.args.get('q', '').strip()
+    page = request.args.get('page', 1, type=int)
+    if page < 1:
+        page = 1
+    limit = 10
+    start = (page - 1) * limit
+    end = start + limit - 1
+    
     entries = []
     selected = None
+    total_count = 0
+    total_pages = 1
+    page_range = []
+    
     if selected_id:
         selected = get_company(selected_id)
-        entries = sb.table('knowledge_base').select('*') \
-            .eq('company_id', selected_id).order('created_at', desc=True).execute().data or []
+        query = sb.table('knowledge_base').select('*', count='exact').eq('company_id', selected_id)
+        if q:
+            query = query.or_(f"title.ilike.%{q}%,content.ilike.%{q}%")
+            
+        res = query.order('created_at', desc=True).range(start, end).execute()
+        entries = res.data or []
+        total_count = res.count or 0
+        total_pages = math.ceil(total_count / limit) if total_count > 0 else 1
+        
+        # 計算要顯示的頁碼範圍 (前後各 2 頁)
+        start_page = max(1, page - 2)
+        end_page = min(total_pages, page + 2)
+        page_range = list(range(start_page, end_page + 1))
+        
     return render_template('knowledge.html', companies=companies,
-                           selected=selected, entries=entries)
+                           selected=selected, entries=entries,
+                           q=q, page=page, total_pages=total_pages, 
+                           total_count=total_count, page_range=page_range)
 
 
 @app.route('/knowledge/add', methods=['POST'])

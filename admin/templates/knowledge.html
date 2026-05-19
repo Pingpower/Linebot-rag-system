@@ -142,7 +142,7 @@
 <div class="card mb-4">
   <div class="card-header">
     <h2 class="card-title">手動新增條目</h2>
-    <span class="text-muted text-sm">共 {{ entries|length }} 條</span>
+    <span class="text-muted text-sm">共 {{ total_count }} 條</span>
   </div>
   <form method="POST" action="{{ url_for('knowledge_add') }}" style="padding:1.5rem">
     <input type="hidden" name="company_id" value="{{ selected.id }}">
@@ -184,8 +184,24 @@
 
 <!-- Knowledge List -->
 <div class="card">
-  <div class="card-header">
-    <h2 class="card-title">知識條目列表</h2>
+  <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap;">
+    <h2 class="card-title" style="margin: 0;">
+      知識條目列表
+      {% if q %}
+        <span style="font-size: 0.85rem; font-weight: normal; color: var(--text-muted);">（搜尋「{{ q }}」，共 {{ total_count }} 筆）</span>
+      {% else %}
+        <span style="font-size: 0.85rem; font-weight: normal; color: var(--text-muted);">（共 {{ total_count }} 筆）</span>
+      {% endif %}
+    </h2>
+    <form method="GET" action="{{ url_for('knowledge') }}" style="display: flex; gap: 0.5rem; margin: 0; align-items: center;" class="search-input-wrap">
+      <input type="hidden" name="company_id" value="{{ selected.id }}">
+      <input type="text" name="q" placeholder="搜尋標題或內容..." value="{{ q }}" 
+             style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: var(--text); border-radius: 6px; padding: 0.45rem 0.75rem; font-size: 0.85rem; min-width: 180px; width: auto;">
+      <button type="submit" class="btn btn-outline btn-sm" style="padding: 0.45rem 0.75rem;">搜尋</button>
+      {% if q %}
+        <a href="{{ url_for('knowledge', company_id=selected.id) }}" class="btn btn-sm" style="background: rgba(255,255,255,0.05); color: var(--text-muted); padding: 0.45rem 0.75rem; border-radius: 6px; text-decoration: none;">清除</a>
+      {% endif %}
+    </form>
   </div>
   <div class="table-wrap">
     <table class="table">
@@ -222,6 +238,40 @@
       </tbody>
     </table>
   </div>
+  
+  <!-- Pagination UI -->
+  {% if total_pages > 1 %}
+  <div class="pagination-container" style="display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.5rem; border-top: 1px solid rgba(255,255,255,0.08); background: rgba(0,0,0,0.1); border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; flex-wrap: wrap; gap: 1rem;">
+    <div class="text-sm text-muted">
+      顯示第 {{ (page - 1) * 10 + 1 }} 到 {{ (page - 1) * 10 + entries|length }} 條，共 {{ total_count }} 條
+    </div>
+    <div class="pagination-buttons" style="display: flex; gap: 0.25rem;">
+      <!-- 第一頁 / 上一頁 -->
+      {% if page > 1 %}
+        <a href="{{ url_for('knowledge', company_id=selected.id, q=q, page=1) }}" class="btn-page" title="第一頁">«</a>
+        <a href="{{ url_for('knowledge', company_id=selected.id, q=q, page=page - 1) }}" class="btn-page" title="上一頁">‹</a>
+      {% else %}
+        <span class="btn-page disabled">«</span>
+        <span class="btn-page disabled">‹</span>
+      {% endif %}
+
+      <!-- 頁碼範圍 -->
+      {% for p in page_range %}
+        <a href="{{ url_for('knowledge', company_id=selected.id, q=q, page=p) }}" 
+           class="btn-page {% if p == page %}active{% endif %}">{{ p }}</a>
+      {% endfor %}
+
+      <!-- 下一頁 / 最末頁 -->
+      {% if page < total_pages %}
+        <a href="{{ url_for('knowledge', company_id=selected.id, q=q, page=page + 1) }}" class="btn-page" title="下一頁">›</a>
+        <a href="{{ url_for('knowledge', company_id=selected.id, q=q, page=total_pages) }}" class="btn-page" title="最末頁">»</a>
+      {% else %}
+        <span class="btn-page disabled">›</span>
+        <span class="btn-page disabled">»</span>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
 </div>
 {% endif %}
 {% endblock %}
@@ -324,6 +374,49 @@
 .subpage-item-label:hover {
   background: rgba(99, 102, 241, 0.12) !important;
   border-color: rgba(99, 102, 241, 0.4) !important;
+}
+
+/* ── Pagination & Search Styles ── */
+.btn-page {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.btn-page:hover {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: rgba(99, 102, 241, 0.4);
+  color: #a5b4fc;
+}
+.btn-page.active {
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  border-color: transparent;
+  color: #ffffff;
+  box-shadow: 0 4px 12px rgba(79, 70, 229, 0.25);
+}
+.btn-page.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.search-input-wrap input {
+  transition: all 0.2s ease;
+}
+.search-input-wrap input:focus {
+  border-color: #6366f1 !important;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+  outline: none;
 }
 </style>
 
