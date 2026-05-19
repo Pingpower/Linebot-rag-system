@@ -3,7 +3,9 @@
 {% block body %}
 <div class="login-page">
   <div class="login-card">
-    <div class="login-logo">🤖</div>
+    <div class="login-logo-container">
+      <img src="{{ url_for('static', filename='logo.png') }}" alt="Logo" class="login-logo-img">
+    </div>
     <h2 class="login-title">LINE Bot 管理後台</h2>
     <p class="login-sub">請輸入管理員帳號密碼</p>
     {% with messages = get_flashed_messages(with_categories=true) %}

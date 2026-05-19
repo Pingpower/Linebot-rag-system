@@ -7,6 +7,10 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="icon" type="image/png" href="{{ url_for('static', filename='favicon-96x96.png') }}" sizes="96x96" />
+  <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}" />
+  <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='apple-touch-icon.png') }}" />
+  <link rel="manifest" href="{{ url_for('static', filename='site.webmanifest') }}" />
 </head>
 <body>
   {% if session.get('logged_in') %}
@@ -14,7 +18,7 @@
     <!-- Sidebar -->
     <aside class="sidebar">
       <div class="sidebar-brand">
-        <div class="brand-icon">🤖</div>
+        <img src="{{ url_for('static', filename='logo.png') }}" alt="Logo" class="brand-logo-img">
         <div>
           <div class="brand-title">LINE Bot</div>
           <div class="brand-sub">管理後台</div>

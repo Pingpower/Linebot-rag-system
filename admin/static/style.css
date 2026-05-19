@@ -33,6 +33,7 @@ code { background:var(--surface2); padding:2px 6px; border-radius:4px; font-size
 }
 .sidebar-brand { display:flex; align-items:center; gap:10px; padding:20px 16px; border-bottom:1px solid var(--border); }
 .brand-icon { font-size:28px; }
+.brand-logo-img { width:32px; height:32px; border-radius:8px; object-fit:cover; box-shadow:0 0 10px rgba(99,102,241,0.5); }
 .brand-title { font-weight:700; font-size:14px; }
 .brand-sub { font-size:11px; color:var(--text-muted); }
 
@@ -170,7 +171,8 @@ textarea { resize:vertical; }
 /* ── Login ───────────────────────────────────────────────── */
 .login-page { min-height:100vh; display:flex; align-items:center; justify-content:center; background:radial-gradient(ellipse at top,#1e2d4a 0%,var(--bg) 70%); }
 .login-card { background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:40px; width:380px; box-shadow:var(--shadow); }
-.login-logo { font-size:48px; text-align:center; margin-bottom:12px; }
+.login-logo-container { display:flex; justify-content:center; margin-bottom:16px; }
+.login-logo-img { width:64px; height:64px; border-radius:14px; box-shadow:0 0 15px rgba(99,102,241,0.6); }
 .login-title { text-align:center; font-size:20px; font-weight:700; margin-bottom:4px; }
 .login-sub { text-align:center; color:var(--text-muted); font-size:13px; margin-bottom:24px; }
 .login-form { display:flex; flex-direction:column; gap:16px; }
