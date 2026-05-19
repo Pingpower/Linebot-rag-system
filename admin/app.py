@@ -933,117 +933,133 @@ def _download_model_worker(model_id, download_url, save_path):
     }
     
     temp_save_path = save_path + ".tmp"
-    try:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        
-        # 1. 取得本機已下載的部分大小
-        existing_size = 0
-        if os.path.exists(temp_save_path):
-            existing_size = os.path.getsize(temp_save_path)
-            
-        # 2. 獲取遠端檔案總大小
-        remote_total_size = 0
+    max_retries = 15
+    retry_delay = 5
+    
+    for attempt in range(max_retries):
         try:
-            head_res = req_lib.head(download_url, timeout=15, allow_redirects=True)
-            if head_res.status_code in [200, 206]:
-                content_length = head_res.headers.get('content-length')
-                remote_total_size = int(content_length) if content_length else 0
-                cr = head_res.headers.get('Content-Range')
-                if cr and '/' in cr:
-                    try:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            
+            # 1. 取得本機已下載的部分大小
+            existing_size = 0
+            if os.path.exists(temp_save_path):
+                existing_size = os.path.getsize(temp_save_path)
+                
+            # 2. 獲取遠端檔案總大小
+            remote_total_size = 0
+            try:
+                head_res = req_lib.head(download_url, timeout=20, allow_redirects=True)
+                if head_res.status_code in [200, 206]:
+                    content_length = head_res.headers.get('content-length')
+                    remote_total_size = int(content_length) if content_length else 0
+                    cr = head_res.headers.get('Content-Range')
+                    if cr and '/' in cr:
+                        try:
+                            remote_total_size = int(cr.split('/')[-1])
+                        except:
+                            pass
+            except Exception as e:
+                logger.warning(f"HEAD request failed, fallback to GET range: {e}")
+                
+            if remote_total_size == 0:
+                try:
+                    test_res = req_lib.get(download_url, headers={'Range': 'bytes=0-0'}, timeout=20)
+                    cr = test_res.headers.get('Content-Range')
+                    if cr and '/' in cr:
                         remote_total_size = int(cr.split('/')[-1])
+                except Exception as e:
+                    logger.error(f"Failed to get remote size via fallback GET: {e}")
+
+            # 3. 若已下載大小大於等於遠端檔案大小，直接重新命名並完成
+            if remote_total_size > 0 and existing_size >= remote_total_size:
+                if os.path.exists(save_path):
+                    try:
+                        os.remove(save_path)
                     except:
                         pass
-        except Exception as e:
-            logger.warning(f"HEAD request failed, fallback to GET range: {e}")
-            
-        if remote_total_size == 0:
-            try:
-                test_res = req_lib.get(download_url, headers={'Range': 'bytes=0-0'}, timeout=15)
-                cr = test_res.headers.get('Content-Range')
-                if cr and '/' in cr:
-                    remote_total_size = int(cr.split('/')[-1])
-            except Exception as e:
-                logger.error(f"Failed to get remote size via fallback GET: {e}")
+                os.rename(temp_save_path, save_path)
+                DOWNLOAD_STATUS[model_id].update({
+                    "status": "completed",
+                    "percent": 100,
+                    "downloaded_mb": round(remote_total_size / (1024 * 1024), 1),
+                    "total_mb": round(remote_total_size / (1024 * 1024), 1),
+                    "speed": "0MB/s",
+                    "error": ""
+                })
+                return
 
-        # 3. 若已下載大小大於等於遠端檔案大小，直接重新命名並完成
-        if remote_total_size > 0 and existing_size >= remote_total_size:
+            # 4. 準備 HTTP Range 請求
+            headers = {}
+            if existing_size > 0:
+                headers['Range'] = f"bytes={existing_size}-"
+                
+            response = req_lib.get(download_url, headers=headers, stream=True, timeout=45)
+            
+            if response.status_code == 206:
+                content_length = response.headers.get('content-length')
+                total_size = existing_size + (int(content_length) if content_length else 0)
+                write_mode = 'ab'
+                downloaded = existing_size
+            else:
+                response.raise_for_status()
+                content_length = response.headers.get('content-length')
+                total_size = int(content_length) if content_length else 0
+                write_mode = 'wb'
+                downloaded = 0
+                
+            total_mb = round(total_size / (1024 * 1024), 1)
+            DOWNLOAD_STATUS[model_id]["total_mb"] = total_mb
+            
+            start_time = time.time()
+            chunk_downloaded_this_session = 0
+            
+            with open(temp_save_path, write_mode) as f:
+                for chunk in response.iter_content(chunk_size=512*1024):  # 512KB chunks
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    chunk_downloaded_this_session += len(chunk)
+                    downloaded_mb = round(downloaded / (1024 * 1024), 1)
+                    
+                    elapsed = time.time() - start_time
+                    session_downloaded_mb = chunk_downloaded_this_session / (1024 * 1024)
+                    speed = round(session_downloaded_mb / elapsed, 2) if elapsed > 0 else 0
+                    percent = int(100 * downloaded / total_size) if total_size > 0 else 0
+                    
+                    DOWNLOAD_STATUS[model_id].update({
+                        "percent": percent,
+                        "downloaded_mb": downloaded_mb,
+                        "speed": f"{speed}MB/s",
+                        "error": ""
+                    })
+                    
+            # 5. 下載完成，重命名為正式檔名
             if os.path.exists(save_path):
                 try:
                     os.remove(save_path)
                 except:
                     pass
             os.rename(temp_save_path, save_path)
-            DOWNLOAD_STATUS[model_id].update({
-                "status": "completed",
-                "percent": 100,
-                "downloaded_mb": round(remote_total_size / (1024 * 1024), 1),
-                "total_mb": round(remote_total_size / (1024 * 1024), 1),
-                "speed": "0MB/s"
-            })
+            
+            DOWNLOAD_STATUS[model_id]["status"] = "completed"
+            logger.info(f"Model {model_id} downloaded successfully to {save_path}")
             return
-
-        # 4. 準備 HTTP Range 請求
-        headers = {}
-        if existing_size > 0:
-            headers['Range'] = f"bytes={existing_size}-"
             
-        response = req_lib.get(download_url, headers=headers, stream=True, timeout=30)
-        
-        if response.status_code == 206:
-            content_length = response.headers.get('content-length')
-            total_size = existing_size + (int(content_length) if content_length else 0)
-            write_mode = 'ab'
-            downloaded = existing_size
-        else:
-            response.raise_for_status()
-            content_length = response.headers.get('content-length')
-            total_size = int(content_length) if content_length else 0
-            write_mode = 'wb'
-            downloaded = 0
-            
-        total_mb = round(total_size / (1024 * 1024), 1)
-        DOWNLOAD_STATUS[model_id]["total_mb"] = total_mb
-        
-        start_time = time.time()
-        chunk_downloaded_this_session = 0
-        
-        with open(temp_save_path, write_mode) as f:
-            for chunk in response.iter_content(chunk_size=1024*1024):  # 1MB chunks
-                if not chunk:
-                    continue
-                f.write(chunk)
-                downloaded += len(chunk)
-                chunk_downloaded_this_session += len(chunk)
-                downloaded_mb = round(downloaded / (1024 * 1024), 1)
-                
-                elapsed = time.time() - start_time
-                session_downloaded_mb = chunk_downloaded_this_session / (1024 * 1024)
-                speed = round(session_downloaded_mb / elapsed, 2) if elapsed > 0 else 0
-                percent = int(100 * downloaded / total_size) if total_size > 0 else 0
-                
+        except Exception as e:
+            logger.error(f"Download attempt {attempt+1}/{max_retries} failed for {model_id}: {e}")
+            if attempt == max_retries - 1:
                 DOWNLOAD_STATUS[model_id].update({
-                    "percent": percent,
-                    "downloaded_mb": downloaded_mb,
-                    "speed": f"{speed}MB/s"
+                    "status": "failed",
+                    "error": f"下載失敗 (已達最大重試次數): {str(e)}"
                 })
-                
-        # 5. 下載完成，重命名為正式檔名
-        if os.path.exists(save_path):
-            try:
-                os.remove(save_path)
-            except:
-                pass
-        os.rename(temp_save_path, save_path)
-        
-        DOWNLOAD_STATUS[model_id]["status"] = "completed"
-        logger.info(f"Model {model_id} downloaded successfully to {save_path}")
-    except Exception as e:
-        DOWNLOAD_STATUS[model_id].update({
-            "status": "failed",
-            "error": str(e)
-        })
-        logger.error(f"Download model failed for {model_id}: {e}")
+            else:
+                DOWNLOAD_STATUS[model_id].update({
+                    "status": "downloading",
+                    "error": f"連線異常，正在進行第 {attempt+1} 次自動重試... ({str(e)})",
+                    "speed": "自動重連中"
+                })
+                time.sleep(retry_delay)
 
 
 @app.route('/models/explore')
