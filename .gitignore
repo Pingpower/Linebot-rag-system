@@ -25,7 +25,8 @@ download_log.txt
 uploads/
 
 # Backups and outputs
-output/
+output/env_backup_*
+output/antigravity_backup_*
 *.tar.gz
 
 # IDE and OS files
