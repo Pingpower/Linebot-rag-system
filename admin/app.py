@@ -970,10 +970,52 @@ def models_explore():
     return render_template('models_explore.html', local_models=local_models, current_model=current_model)
 
 
+def _get_model_size_billion(model_id):
+    import re
+    model_id_lower = model_id.lower()
+    matches = re.findall(r'(\d+(?:\.\d+)?)\s*b', model_id_lower)
+    if matches:
+        try:
+            return float(matches[-1])
+        except ValueError:
+            pass
+    matches_m = re.findall(r'(\d+(?:\.\d+)?)\s*m', model_id_lower)
+    if matches_m:
+        try:
+            return float(matches_m[-1]) / 1000.0
+        except ValueError:
+            pass
+    return 7.0
+
+
+def _is_model_suitable(model_size_b, vram_gb):
+    if vram_gb <= 0:  # 純 CPU 模式
+        return model_size_b <= 8.0  # CPU 最多跑 8B，再大會極度卡頓
+    elif vram_gb <= 6.5:
+        return model_size_b <= 9.5  # 6GB 舒適跑 9.5B 以下 (如 7B, 8B, 9B)
+    elif vram_gb <= 12.5:
+        return model_size_b <= 15.5  # 12GB 舒適跑 14B/15B 以下
+    elif vram_gb <= 16.5:
+        return model_size_b <= 22.5  # 16GB 舒適跑 20B/22B 以下
+    else:
+        return model_size_b <= 34.5  # 24GB 舒適跑 32B/34B 以下
+
+
 @app.route('/api/models/search')
 @login_required
 def api_models_search():
     query = request.args.get('q', '').strip()
+    
+    # 1. 取得 GPU 總顯存大小 (VRAM) 以進行動態篩選
+    vram_total_gb = 0.0
+    try:
+        cmd_vram = "nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits"
+        out_vram = subprocess.check_output(cmd_vram, shell=True, text=True).strip()
+        if out_vram:
+            vram_total_gb = float(out_vram) / 1024.0
+    except Exception:
+        pass  # 無 GPU 或獲取失敗，視為純 CPU 模式
+        
     # 擴大拉取數量至 100 名以供後端過濾，並使用 full=true 取得更新時間與檔案列表
     url = "https://huggingface.co/api/models?sort=downloads&direction=-1&limit=100&filter=gguf&full=true"
     if query:
@@ -1002,23 +1044,18 @@ def api_models_search():
                 except Exception:
                     pass
             
-            # 2. 排除本機(GTX 1060 6GB/16GB RAM)完全無法負擔的超大模型 (如 >=30B)
-            model_id_lower = model_id.lower()
-            unsuitable_patterns = ['30b', '70b', '120b', '405b', '103b', '72b', '110b', '180b']
-            if any(p in model_id_lower for p in unsuitable_patterns):
-                continue
+            # 2. 解析模型參數大小 (Billion)
+            model_size_b = _get_model_size_billion(model_id)
+            
+            # 3. 依據本機配備之 VRAM 動態篩選適合運行的模型大小
+            if not _is_model_suitable(model_size_b, vram_total_gb):
+                continue  # 超過本機配備極限的模型直接排除，不呈現於搜尋結果
                 
             # 計算該 Repository 內的 GGUF 檔案數量，若無 GGUF 檔則過濾
             siblings = m.get('siblings', [])
             gguf_count = sum(1 for s in siblings if s.get('rfilename', '').endswith('.gguf'))
             if gguf_count == 0:
                 continue
-                
-            # 3. 標註並過濾適合這台 6GB 顯卡執行的主流尺寸 (0.5B ~ 14B)
-            # 6GB VRAM 最合適的為 1.5B/3B, 7B/8B 是極限 (需 Q4 量化且可能需 offload 記憶體)
-            suitable = any(x in model_id_lower for x in ['0.5b', '1.5b', '3b', '7b', '8b', '9b', '14b', 'gemma-3-1b'])
-            if not suitable:
-                continue  # 不適合的模型直接排除，不呈現於搜尋結果
             
             processed_models.append({
                 'id': model_id,
