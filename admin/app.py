@@ -1002,22 +1002,57 @@ def models_explore():
     return render_template('models_explore.html', local_models=local_models, current_model=current_model)
 
 
+@app.route('/api/models/local')
+@login_required
+def api_models_local():
+    model_dir = "/home/pipadmin/文件/models"
+    local_models = []
+    if os.path.exists(model_dir):
+        for f in os.listdir(model_dir):
+            if f.endswith('.gguf'):
+                fpath = os.path.join(model_dir, f)
+                try:
+                    size_gb = round(os.path.getsize(fpath) / (1024*1024*1024), 2)
+                    local_models.append({
+                        'name': f,
+                        'size': f"{size_gb} GB",
+                        'path': fpath
+                    })
+                except Exception:
+                    pass
+                    
+    current_metrics = get_server_metrics()
+    current_model = current_metrics.get('model', '無')
+    
+    return jsonify({
+        'local_models': local_models,
+        'current_model': current_model
+    })
+
+
+
 def _get_model_size_billion(model_id):
     import re
     model_id_lower = model_id.lower()
     
-    # 1. 優先匹配 MoE 格式，例如 8x7b, 8x22b, 4x8b
+    # 1. 優先匹配 A\d+B 格式，例如 A3B, A4B, A3.5B
+    active_match = re.search(r'a(\d+(?:\.\d+)?)\s*b', model_id_lower)
+    if active_match:
+        try:
+            return float(active_match.group(1))
+        except ValueError:
+            pass
+            
+    # 2. 匹配 MoE 8x7b 等格式，以每次啟動 2 個專家 (expert_size * 2) 估算運作大小
     moe_match = re.search(r'(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*b', model_id_lower)
     if moe_match:
         try:
-            experts = int(moe_match.group(1))
             expert_size = float(moe_match.group(2))
-            # 估算 MoE 總容量 (通常為 expert 乘積的 80% ~ 85% 左右，以 0.85 安全估算)
-            return experts * expert_size * 0.85
+            return expert_size * 2.0
         except ValueError:
             pass
 
-    # 2. 匹配常規 7b, 8b, 14b, 1.5b 等
+    # 3. 匹配常規 7b, 8b, 14b, 1.5b 等
     matches = re.findall(r'(\d+(?:\.\d+)?)\s*b', model_id_lower)
     if matches:
         try:
@@ -1025,7 +1060,7 @@ def _get_model_size_billion(model_id):
         except ValueError:
             pass
             
-    # 3. 匹配 500m 等極小模型
+    # 4. 匹配 500m 等極小模型
     matches_m = re.findall(r'(\d+(?:\.\d+)?)\s*m', model_id_lower)
     if matches_m:
         try:
@@ -1034,6 +1069,7 @@ def _get_model_size_billion(model_id):
             pass
             
     return 7.0
+
 
 
 def _is_model_suitable(model_size_b, vram_gb):
@@ -1124,11 +1160,20 @@ def api_models_search():
         return jsonify({'error': str(e)}), 500
 
 
-def _is_file_suitable(file_size_bytes, vram_gb):
+def _is_file_suitable(file_size_bytes, vram_gb, filename=""):
+    import re
     file_size_gb = file_size_bytes / (1024 * 1024 * 1024)
     # 過濾小於 10MB 的 dummy 檔案
     if file_size_gb < 0.01:
         return False
+        
+    # 檢查是否為 MoE 格式，如果是，因為本機有 32GB RAM 可以跑 CPU 混合推理，放寬限制至 26.0 GB
+    filename_lower = filename.lower()
+    is_moe = "moe" in filename_lower or "8x" in filename_lower or re.search(r'a\d+b', filename_lower) is not None
+    
+    if is_moe:
+        return file_size_gb <= 26.0 # 允許下載並執行 26GB 以下的 MoE 模型
+        
     if vram_gb <= 0:  # 純 CPU
         return file_size_gb <= 6.5
     elif vram_gb <= 6.5:
@@ -1169,7 +1214,7 @@ def api_models_files():
             path = f.get('path', '')
             size = f.get('size', 0)
             if path.endswith('.gguf'):
-                suitable = _is_file_suitable(size, vram_total_gb)
+                suitable = _is_file_suitable(size, vram_total_gb, filename=path)
                 gguf_files.append({
                     'name': path,
                     'size_formatted': f"{round(size / (1024*1024*1024), 2)} GB" if size else "未知",

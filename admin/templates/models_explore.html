@@ -522,7 +522,25 @@
       setInterval(updateGPUInfo, 5000); // 每 5 秒更新一次 VRAM 用量
       searchHFModels();
       loadHFTokenStatus();
+      checkActiveDownloadsOnLoad();
   });
+
+  // 頁面載入時檢查是否有進行中的下載任務
+  async function checkActiveDownloadsOnLoad() {
+      try {
+          const res = await fetch('/api/models/download/status');
+          const tasks = await res.json();
+          const keys = Object.keys(tasks);
+          const anyDownloading = keys.some(k => tasks[k].status === 'downloading');
+          if (anyDownloading) {
+              startProgressPolling();
+          } else if (keys.length > 0) {
+              updateDownloadProgress();
+          }
+      } catch (err) {
+          console.error("Check active downloads failed:", err);
+      }
+  }
 
   // 頁籤切換
   function switchTab(tabId) {
@@ -631,6 +649,56 @@
       }
   }
 
+  // 動態刷新本地模型列表 (零刷新)
+  async function reloadLocalModelsList() {
+      try {
+          const res = await fetch('/api/models/local');
+          const data = await res.json();
+          const listContainer = document.getElementById('local-models-list');
+          
+          if (!data.local_models || data.local_models.length === 0) {
+              listContainer.innerHTML = `
+                  <div class="text-center py-8 text-muted">
+                      目前沒有已下載的模型。請從右側的 Hugging Face 市場下載！
+                  </div>
+              `;
+              return;
+          }
+          
+          listContainer.innerHTML = data.local_models.map(m => {
+              const isActive = m.name === data.current_model;
+              const activeClass = isActive ? 'active' : '';
+              
+              let actionHtml = "";
+              if (isActive) {
+                  actionHtml = `
+                      <span class="status-dot green"></span>
+                      <span class="text-sm" style="color: var(--success); font-weight: 600;">執行中</span>
+                  `;
+              } else {
+                  actionHtml = `
+                      <button class="btn btn-primary btn-sm" onclick="switchModel('${m.name}')">一鍵啟用</button>
+                      <button class="btn btn-sm" onclick="deleteModel('${m.name}')" style="background: rgba(239, 68, 68, 0.1); color: var(--danger); border: 1px solid rgba(239, 68, 68, 0.2); padding: 5px 10px; border-radius: 4px; cursor: pointer;">🗑️ 刪除</button>
+                  `;
+              }
+              
+              return `
+                  <div class="model-item ${activeClass}">
+                      <div class="model-item-info">
+                          <span class="model-item-name">${m.name}</span>
+                          <span class="model-item-size">${m.size}</span>
+                      </div>
+                      <div class="model-item-actions" style="display: flex; gap: 8px; align-items: center;">
+                          ${actionHtml}
+                      </div>
+                  </div>
+              `;
+          }).join('');
+      } catch (err) {
+          console.error("無法刷新本地模型列表:", err);
+      }
+  }
+
   // 一鍵刪除模型
   async function deleteModel(modelName) {
       if (!confirm(`⚠️ 警告：確定要永久刪除模型檔案：\n\n${modelName}\n\n嗎？此操作將無法還原，但可釋放硬碟空間！`)) {
@@ -648,7 +716,7 @@
               alert(`刪除失敗: ${data.error}`);
           } else {
               alert(data.msg);
-              window.location.reload();
+              reloadLocalModelsList();
           }
       } catch (err) {
           alert("請求刪除失敗，請稍後重試！");
@@ -722,13 +790,13 @@
           
           container.innerHTML = files.map(f => {
               const warningBadge = !f.suitable 
-                  ? `<span class="badge badge-warning" style="background-color: rgba(220,53,69,0.15); color: #dc3545; font-size: 11px; margin-left: 8px; border: 1px solid rgba(220,53,69,0.3); padding: 2px 6px; border-radius: 4px;">⚠️ 恐超顯存極限 / 執行卡頓</span>` 
+                  ? `<span class="badge badge-warning" style="background-color: rgba(245,158,11,0.15); color: var(--warn); font-size: 11px; margin-left: 8px; border: 1px solid rgba(245,158,11,0.3); padding: 2px 6px; border-radius: 4px;">⚠️ 恐超顯存極限 / 執行卡頓</span>` 
                   : `<span class="badge badge-success" style="background-color: rgba(40,167,69,0.15); color: #28a745; font-size: 11px; margin-left: 8px; border: 1px solid rgba(40,167,69,0.3); padding: 2px 6px; border-radius: 4px;">適合本機</span>`;
               const downloadBtn = !f.suitable
-                  ? `<button class="btn btn-secondary btn-sm" style="background: rgba(255,255,255,0.05); color: var(--text-muted); cursor: not-allowed;" disabled>不建議</button>`
+                  ? `<button class="btn btn-sm" onclick="triggerDownload('${modelId}', '${f.name}')" style="background: rgba(245, 158, 11, 0.1); color: var(--warn); border: 1px solid rgba(245, 158, 11, 0.3);">下載 (不建議)</button>`
                   : `<button class="btn btn-primary btn-sm" onclick="triggerDownload('${modelId}', '${f.name}')">下載</button>`;
               return `
-                  <div class="modal-file-item" style="opacity: ${f.suitable ? 1 : 0.65}; padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; justify-content: space-between; align-items: center;">
+                  <div class="modal-file-item" style="opacity: ${f.suitable ? 1 : 0.85}; padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; justify-content: space-between; align-items: center;">
                       <div>
                           <strong style="font-size: 13px; color: var(--text); word-break: break-all;">${f.name}</strong>
                           <div class="text-sm text-muted" style="display: flex; align-items: center; gap: 4px; margin-top: 4px;">
@@ -836,15 +904,14 @@
               `;
           }).join('');
           
-          // 如果所有任務都結束了 (completed / failed)，停止輪詢
+          // 如果所有任務都結束了 (completed / failed)，且確實有過下載任務，停止輪詢並動態刷新本地清單 (零刷新)
           const anyDownloading = keys.some(k => tasks[k].status === 'downloading');
-          if (!anyDownloading && downloadInterval) {
+          if (keys.length > 0 && !anyDownloading && downloadInterval) {
               clearInterval(downloadInterval);
               downloadInterval = null;
-              // 提醒重新整理本地列表
               setTimeout(() => {
-                  window.location.reload();
-              }, 3000);
+                  reloadLocalModelsList();
+              }, 1500); // 1.5秒後刷新以確保磁碟寫入完成並被系統註冊
           }
       } catch (err) {
           console.error("Poll progress failed:", err);
