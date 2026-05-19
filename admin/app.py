@@ -1289,17 +1289,25 @@ def api_models_switch():
         if not os.path.exists(selected_path):
             return jsonify({'error': '該模型檔案不存在'}), 400
             
-        # 1. 寫入 ~/.config/linebot/selected_model 紀錄檔
         config_dir = os.path.expanduser("~/.config/linebot")
         os.makedirs(config_dir, exist_ok=True)
-        with open(os.path.join(config_dir, "selected_model"), "w") as f:
-            f.write(selected_path)
-            
+        selected_model_file = os.path.join(config_dir, "selected_model")
+        
+        # 備份舊的模型路徑以備回滾
+        old_selected_path = None
+        if os.path.exists(selected_model_file):
+            try:
+                with open(selected_model_file, "r") as sf:
+                    old_selected_path = sf.read().strip()
+            except Exception:
+                pass
+                
         # 讀取微調設定檔
         config_path = os.path.join(config_dir, "engine_config.json")
         threads = 8
         gpu_layers = 10
         ctx_size = 8192
+        old_cfg = {'threads': 8, 'gpu_layers': 10, 'ctx_size': 8192}
         if os.path.exists(config_path):
             try:
                 with open(config_path, 'r') as cf:
@@ -1307,15 +1315,21 @@ def api_models_switch():
                     threads = int(cfg.get('threads', 8))
                     gpu_layers = int(cfg.get('gpu_layers', 10))
                     ctx_size = int(cfg.get('ctx_size', 8192))
+                    old_cfg = cfg
             except Exception:
                 pass
+
+        # 1. 寫入 ~/.config/linebot/selected_model 紀錄檔
+        with open(selected_model_file, "w") as f:
+            f.write(selected_path)
             
         # 2. 更新 systemd 服務配置 (寫入最新 ExecStart)
         user_systemd = os.path.expanduser("~/.config/systemd/user")
         os.makedirs(user_systemd, exist_ok=True)
         service_path = os.path.join(user_systemd, "linebot-llama.service")
         
-        service_content = f"""[Unit]
+        def write_service_file(m_path, t, g, c):
+            content = f"""[Unit]
 Description=LINE Bot LLaMA Server
 After=network.target
 
@@ -1323,12 +1337,12 @@ After=network.target
 Type=simple
 WorkingDirectory=/home/pipadmin/文件
 ExecStart=/home/pipadmin/文件/llama.cpp/build/bin/llama-server \\
-    --model {selected_path} \\
+    --model {m_path} \\
     --host 127.0.0.1 \\
     --port 8080 \\
-    --ctx-size {ctx_size} \\
-    --n-gpu-layers {gpu_layers} \\
-    --threads {threads} \\
+    --ctx-size {c} \\
+    --n-gpu-layers {g} \\
+    --threads {t} \\
     --parallel 2 \\
     --log-disable
 Restart=always
@@ -1340,8 +1354,10 @@ Environment=HOME=/home/pipadmin
 [Install]
 WantedBy=default.target
 """
-        with open(service_path, "w") as f:
-            f.write(service_content)
+            with open(service_path, "w") as sf:
+                sf.write(content)
+
+        write_service_file(selected_path, threads, gpu_layers, ctx_size)
             
         # 3. 重新載入 Systemd 並重啟服務
         subprocess.run("systemctl --user daemon-reload", shell=True, check=True)
@@ -1350,7 +1366,60 @@ WantedBy=default.target
         time.sleep(1)
         subprocess.run("systemctl --user start linebot-llama", shell=True, check=True)
         
-        return jsonify({'ok': True, 'msg': f'已切換至模型 {model_name}，服務重新啟動中。'})
+        # 4. 偵測引擎是否在 2.5 秒內崩潰，若崩潰則嘗試分析日誌並自動回滾
+        time.sleep(2.5)
+        status_check = subprocess.run("systemctl --user is-active linebot-llama", shell=True, capture_output=True, text=True)
+        is_active = status_check.stdout.strip() == "active"
+        
+        if not is_active:
+            err_msg = "模型啟動失敗，引擎進程已退出。"
+            log_path = "/home/pipadmin/文件/llama.log"
+            if os.path.exists(log_path):
+                try:
+                    with open(log_path, "r", encoding="utf-8", errors="ignore") as lf:
+                        log_lines = lf.readlines()[-150:]
+                    log_text = "".join(log_lines)
+                    if "data is not within the file bounds" in log_text or "corrupted or incomplete" in log_text:
+                        err_msg = "模型載入失敗：該模型檔案已損壞，可能是下載中斷或不完整，建議刪除重新下載！"
+                    elif "cudaError" in log_text or "CUDA error" in log_text or "out of memory" in log_text or "CUDA_ERROR_OUT_OF_MEMORY" in log_text:
+                        err_msg = "顯卡記憶體 (VRAM) 不足！GTX 1060 (6GB) 無法承載此微調參數，請調低 GPU 卸載層數 (建議設為 0) 或縮小上下文大小。"
+                    elif "failed to load model" in log_text:
+                        err_msg = "引擎載入模型失敗，請確認檔案格式是否正確且完整。"
+                except Exception as le:
+                    logger.error(f"Read llama.log error: {le}")
+            
+            # 執行回滾
+            if old_selected_path and os.path.exists(old_selected_path) and old_selected_path != selected_path:
+                with open(selected_model_file, "w") as f:
+                    f.write(old_selected_path)
+                write_service_file(old_selected_path, old_cfg.get('threads', 8), old_cfg.get('gpu_layers', 10), old_cfg.get('ctx_size', 8192))
+                subprocess.run("systemctl --user daemon-reload", shell=True)
+                subprocess.run("systemctl --user stop linebot-llama", shell=True)
+                subprocess.run("pkill -9 -f 'llama-server'", shell=True)
+                time.sleep(1)
+                subprocess.run("systemctl --user start linebot-llama", shell=True)
+                return jsonify({'error': f'{err_msg} 已自動回滾至先前工作的模型。'}), 400
+            else:
+                # 若無舊模型可回滾，嘗試以 CPU-only 預設安全參數重啟目前模型
+                safe_threads = 8
+                safe_gpu = 0
+                safe_ctx = 2048
+                write_service_file(selected_path, safe_threads, safe_gpu, safe_ctx)
+                subprocess.run("systemctl --user daemon-reload", shell=True)
+                subprocess.run("systemctl --user stop linebot-llama", shell=True)
+                subprocess.run("pkill -9 -f 'llama-server'", shell=True)
+                time.sleep(1)
+                subprocess.run("systemctl --user start linebot-llama", shell=True)
+                
+                # 更新設定檔為安全參數
+                try:
+                    with open(config_path, 'w') as cf:
+                        json.dump({'threads': safe_threads, 'gpu_layers': safe_gpu, 'ctx_size': safe_ctx}, cf)
+                except Exception:
+                    pass
+                return jsonify({'error': f'{err_msg} 已自動調整為 CPU 預設安全配置（GPU層數=0, Context=2048）重新啟動。'}), 400
+                
+        return jsonify({'ok': True, 'msg': f'已成功切換至模型 {model_name}。'})
     except Exception as e:
         logger.error(f"Switch model failed: {e}")
         return jsonify({'error': f'切換模型失敗: {str(e)}'}), 500
@@ -1402,6 +1471,15 @@ def api_models_config():
                 'ctx_size': ctx_size
             }
             
+            # 備份舊配置以備回滾
+            old_config = {'threads': 8, 'gpu_layers': 10, 'ctx_size': 8192}
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, 'r') as cf:
+                        old_config = json.load(cf)
+                except Exception:
+                    pass
+
             with open(config_path, 'w') as f:
                 json.dump(config, f)
                 
@@ -1415,7 +1493,8 @@ def api_models_config():
                     user_systemd = os.path.expanduser("~/.config/systemd/user")
                     service_path = os.path.join(user_systemd, "linebot-llama.service")
                     
-                    service_content = f"""[Unit]
+                    def write_service_file(m_path, t, g, c):
+                        content = f"""[Unit]
 Description=LINE Bot LLaMA Server
 After=network.target
 
@@ -1423,12 +1502,12 @@ After=network.target
 Type=simple
 WorkingDirectory=/home/pipadmin/文件
 ExecStart=/home/pipadmin/文件/llama.cpp/build/bin/llama-server \\
-    --model {selected_path} \\
+    --model {m_path} \\
     --host 127.0.0.1 \\
     --port 8080 \\
-    --ctx-size {ctx_size} \\
-    --n-gpu-layers {gpu_layers} \\
-    --threads {threads} \\
+    --ctx-size {c} \\
+    --n-gpu-layers {g} \\
+    --threads {t} \\
     --parallel 2 \\
     --log-disable
 Restart=always
@@ -1440,8 +1519,10 @@ Environment=HOME=/home/pipadmin
 [Install]
 WantedBy=default.target
 """
-                    with open(service_path, "w") as f:
-                        f.write(service_content)
+                        with open(service_path, "w") as sf:
+                            sf.write(content)
+
+                    write_service_file(selected_path, threads, gpu_layers, ctx_size)
                     
                     subprocess.run("systemctl --user daemon-reload", shell=True, check=True)
                     subprocess.run("systemctl --user stop linebot-llama", shell=True)
@@ -1450,6 +1531,35 @@ WantedBy=default.target
                     subprocess.run("systemctl --user start linebot-llama", shell=True, check=True)
                     restarted = True
                     
+                    # 偵測是否崩潰
+                    time.sleep(2.5)
+                    status_check = subprocess.run("systemctl --user is-active linebot-llama", shell=True, capture_output=True, text=True)
+                    is_active = status_check.stdout.strip() == "active"
+                    
+                    if not is_active:
+                        err_msg = "新微調參數導致引擎啟動失敗。"
+                        log_path = "/home/pipadmin/文件/llama.log"
+                        if os.path.exists(log_path):
+                            try:
+                                with open(log_path, "r", encoding="utf-8", errors="ignore") as lf:
+                                    log_lines = lf.readlines()[-150:]
+                                log_text = "".join(log_lines)
+                                if "cudaError" in log_text or "CUDA error" in log_text or "out of memory" in log_text or "CUDA_ERROR_OUT_OF_MEMORY" in log_text:
+                                    err_msg = "新微調參數導致顯卡記憶體 (VRAM) 不足！請調低 GPU 卸載層數或縮小上下文大小。"
+                            except Exception:
+                                pass
+                        
+                        # 回滾到舊配置
+                        with open(config_path, 'w') as f:
+                            json.dump(old_config, f)
+                        write_service_file(selected_path, old_config.get('threads', 8), old_config.get('gpu_layers', 10), old_config.get('ctx_size', 8192))
+                        subprocess.run("systemctl --user daemon-reload", shell=True)
+                        subprocess.run("systemctl --user stop linebot-llama", shell=True)
+                        subprocess.run("pkill -9 -f 'llama-server'", shell=True)
+                        time.sleep(1)
+                        subprocess.run("systemctl --user start linebot-llama", shell=True)
+                        return jsonify({'error': f'{err_msg} 已自動回滾至先前的微調配置。'}), 400
+                        
             return jsonify({'ok': True, 'restarted': restarted, 'msg': '微調配置已成功儲存並套用！'})
         except Exception as e:
             logger.error(f"Save engine config failed: {e}")
