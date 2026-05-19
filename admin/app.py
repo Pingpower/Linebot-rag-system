@@ -880,6 +880,365 @@ def api_stats(company_id):
     return jsonify(days)
 
 
+# ── Hugging Face & AI Generation ────────────────────────────────────────────────
+
+import threading
+import time
+from hf_api import generate_image as hf_gen_image, generate_video as hf_gen_video
+
+# 全域模型下載進度追蹤器
+DOWNLOAD_STATUS = {}
+
+def _download_model_worker(model_id, download_url, save_path):
+    global DOWNLOAD_STATUS
+    DOWNLOAD_STATUS[model_id] = {
+        "status": "downloading",
+        "percent": 0,
+        "downloaded_mb": 0,
+        "total_mb": 0,
+        "speed": "0MB/s",
+        "error": ""
+    }
+    try:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        # 進行分塊下載以獲取進度
+        response = req_lib.get(download_url, stream=True, timeout=30)
+        response.raise_for_status()
+        total_size = int(response.headers.get('content-length', 0))
+        total_mb = round(total_size / (1024 * 1024), 1)
+        DOWNLOAD_STATUS[model_id]["total_mb"] = total_mb
+        
+        downloaded = 0
+        start_time = time.time()
+        
+        with open(save_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=1024*1024):  # 1MB chunks
+                if not chunk:
+                    continue
+                f.write(chunk)
+                downloaded += len(chunk)
+                downloaded_mb = round(downloaded / (1024 * 1024), 1)
+                
+                # 計算時間、進度與速度
+                elapsed = time.time() - start_time
+                speed = round(downloaded_mb / elapsed, 2) if elapsed > 0 else 0
+                percent = int(100 * downloaded / total_size) if total_size > 0 else 0
+                
+                DOWNLOAD_STATUS[model_id].update({
+                    "percent": percent,
+                    "downloaded_mb": downloaded_mb,
+                    "speed": f"{speed}MB/s"
+                })
+        
+        DOWNLOAD_STATUS[model_id]["status"] = "completed"
+        logger.info(f"Model {model_id} downloaded successfully to {save_path}")
+    except Exception as e:
+        DOWNLOAD_STATUS[model_id].update({
+            "status": "failed",
+            "error": str(e)
+        })
+        logger.error(f"Download model failed for {model_id}: {e}")
+        # 清理未完成的殘留檔案
+        if os.path.exists(save_path):
+            try:
+                os.remove(save_path)
+            except:
+                pass
+
+
+@app.route('/models/explore')
+@login_required
+def models_explore():
+    # 獲取本地已下載的 GGUF 模型列表
+    model_dir = "/home/pipadmin/文件/models"
+    local_models = []
+    if os.path.exists(model_dir):
+        for f in os.listdir(model_dir):
+            if f.endswith('.gguf'):
+                fpath = os.path.join(model_dir, f)
+                size_gb = round(os.path.getsize(fpath) / (1024*1024*1024), 2)
+                local_models.append({
+                    'name': f,
+                    'size': f"{size_gb} GB",
+                    'path': fpath
+                })
+    
+    # 獲取目前啟動的模型名稱
+    current_metrics = get_server_metrics()
+    current_model = current_metrics.get('model', '無')
+    
+    return render_template('models_explore.html', local_models=local_models, current_model=current_model)
+
+
+@app.route('/api/models/search')
+@login_required
+def api_models_search():
+    query = request.args.get('q', '').strip()
+    # 預設拉取下載量前 15 名的 GGUF 模型
+    url = "https://huggingface.co/api/models?sort=downloads&direction=-1&limit=15&filter=gguf"
+    if query:
+        url += f"&search={query}"
+        
+    try:
+        resp = req_lib.get(url, timeout=10)
+        resp.raise_for_status()
+        models = resp.json()
+        
+        processed_models = []
+        for m in models:
+            model_id = m.get('id', '')
+            downloads = m.get('downloads', 0)
+            likes = m.get('likes', 0)
+            
+            # 判斷是否適合這台 GTX 1060 6GB 顯卡 (3B, 7B, 8B 等較小引數模型)
+            # 6GB VRAM 最合適的為 1.5B/3B, 7B/8B 是極限 (需 Q4 量化且可能需 offload 記憶體)
+            suitable = any(x in model_id.lower() for x in ['1.5b', '3b', '7b', '8b', 'gemma-3-1b'])
+            
+            processed_models.append({
+                'id': model_id,
+                'downloads': downloads,
+                'likes': likes,
+                'suitable': suitable
+            })
+        return jsonify(processed_models)
+    except Exception as e:
+        logger.error(f"Search Hugging Face models failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/models/files')
+@login_required
+def api_models_files():
+    model_id = request.args.get('model_id', '').strip()
+    if not model_id:
+        return jsonify({'error': '缺少 model_id'}), 400
+        
+    url = f"https://huggingface.co/api/models/{model_id}/tree/main"
+    try:
+        resp = req_lib.get(url, timeout=10)
+        resp.raise_for_status()
+        files = resp.json()
+        
+        gguf_files = []
+        for f in files:
+            path = f.get('path', '')
+            if path.endswith('.gguf'):
+                gguf_files.append({
+                    'name': path,
+                    'size_formatted': f"{round(f.get('size', 0) / (1024*1024*1024), 2)} GB" if f.get('size') else "未知"
+                })
+        return jsonify(gguf_files)
+    except Exception as e:
+        logger.error(f"Fetch Hugging Face files failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/models/download', methods=['POST'])
+@login_required
+def api_models_download():
+    global DOWNLOAD_STATUS
+    try:
+        data = request.get_json() or {}
+        model_id = data.get('model_id', '').strip()
+        filename = data.get('filename', '').strip()
+        
+        if not model_id or not filename:
+            return jsonify({'error': '缺少必要引數'}), 400
+            
+        # 防止路徑穿越，清理檔名
+        filename = os.path.basename(filename)
+        save_path = os.path.join("/home/pipadmin/文件/models", filename)
+        
+        # 拼接 HF 的下載 URL
+        download_url = f"https://huggingface.co/{model_id}/resolve/main/{filename}"
+        
+        # 檢查是否已下載或正在下載
+        if os.path.exists(save_path):
+            return jsonify({'error': '該模型檔案已下載存在於 models/ 中'}), 400
+            
+        status_key = f"{model_id}/{filename}"
+        if status_key in DOWNLOAD_STATUS and DOWNLOAD_STATUS[status_key]["status"] == "downloading":
+            return jsonify({'error': '該模型正在下載中'}), 400
+            
+        # 開啟非同步執行緒下載
+        t = threading.Thread(target=_download_model_worker, args=(status_key, download_url, save_path))
+        t.start()
+        
+        return jsonify({'ok': True, 'msg': '已開始在背景下載模型，請至進度板查看。', 'task_id': status_key})
+    except Exception as e:
+        logger.error(f"Trigger model download failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/models/download/status')
+@login_required
+def api_models_download_status():
+    global DOWNLOAD_STATUS
+    task_id = request.args.get('task_id', '').strip()
+    if task_id:
+        return jsonify(DOWNLOAD_STATUS.get(task_id, {'status': 'not_found'}))
+    return jsonify(DOWNLOAD_STATUS)
+
+
+@app.route('/api/models/switch', methods=['POST'])
+@login_required
+def api_models_switch():
+    try:
+        data = request.get_json() or {}
+        model_name = data.get('model_name', '').strip()
+        if not model_name or not model_name.endswith('.gguf'):
+            return jsonify({'error': '無效的模型名稱'}), 400
+            
+        model_name = os.path.basename(model_name)
+        model_dir = "/home/pipadmin/文件/models"
+        selected_path = os.path.join(model_dir, model_name)
+        
+        if not os.path.exists(selected_path):
+            return jsonify({'error': '該模型檔案不存在'}), 400
+            
+        # 1. 寫入 ~/.config/linebot/selected_model 紀錄檔
+        config_dir = os.path.expanduser("~/.config/linebot")
+        os.makedirs(config_dir, exist_ok=True)
+        with open(os.path.join(config_dir, "selected_model"), "w") as f:
+            f.write(selected_path)
+            
+        # 2. 更新 systemd 服務配置 (寫入最新 ExecStart)
+        user_systemd = os.path.expanduser("~/.config/systemd/user")
+        os.makedirs(user_systemd, exist_ok=True)
+        service_path = os.path.join(user_systemd, "linebot-llama.service")
+        
+        service_content = f"""[Unit]
+Description=LINE Bot LLaMA Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pipadmin/文件
+ExecStart=/home/pipadmin/文件/llama.cpp/build/bin/llama-server \\
+    --model {selected_path} \\
+    --host 127.0.0.1 \\
+    --port 8080 \\
+    --ctx-size 8192 \\
+    --n-gpu-layers 10 \\
+    --threads 8 \\
+    --parallel 2 \\
+    --log-disable
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/pipadmin/文件/llama.log
+StandardError=append:/home/pipadmin/文件/llama.log
+Environment=HOME=/home/pipadmin
+
+[Install]
+WantedBy=default.target
+"""
+        with open(service_path, "w") as f:
+            f.write(service_content)
+            
+        # 3. 重新載入 Systemd 並重啟服務
+        subprocess.run("systemctl --user daemon-reload", shell=True, check=True)
+        subprocess.run("systemctl --user stop linebot-llama", shell=True)
+        subprocess.run("pkill -9 -f 'llama-server'", shell=True)
+        time.sleep(1)
+        subprocess.run("systemctl --user start linebot-llama", shell=True, check=True)
+        
+        return jsonify({'ok': True, 'msg': f'已切換至模型 {model_name}，服務重新啟動中。'})
+    except Exception as e:
+        logger.error(f"Switch model failed: {e}")
+        return jsonify({'error': f'切換模型失敗: {str(e)}'}), 500
+
+
+@app.route('/api/system/gpu')
+@login_required
+def api_system_gpu():
+    try:
+        # 1. 取得 GPU 名稱
+        cmd_name = "nvidia-smi --query-gpu=name --format=csv,noheader"
+        gpu_name = subprocess.check_output(cmd_name, shell=True, text=True).strip()
+        
+        # 2. 取得 VRAM 用量
+        cmd_vram = "nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits"
+        out_vram = subprocess.check_output(cmd_vram, shell=True, text=True).strip()
+        
+        used, total = 0, 0
+        if out_vram:
+            parts = [p.strip() for p in out_vram.split(',')]
+            if len(parts) >= 2:
+                used = int(parts[0])
+                total = int(parts[1])
+                
+        return jsonify({
+            'name': gpu_name,
+            'vram_used': used,
+            'vram_total': total,
+            'vram_percent': round((used / total) * 100, 1) if total > 0 else 0
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/generate/image', methods=['POST'])
+@login_required
+def api_generate_image():
+    try:
+        data = request.get_json() or {}
+        prompt = data.get('prompt', '').strip()
+        if not prompt:
+            return jsonify({'error': '請提供 Prompt 繪圖指令'}), 400
+            
+        # 呼叫生圖封裝
+        img_bytes = hf_gen_image(prompt)
+        
+        # 儲存到上傳目錄中
+        UPLOAD_FOLDER = "/home/pipadmin/文件/uploads"
+        unique_filename = f"gen_{uuid.uuid4().hex[:12]}.png"
+        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+        
+        save_path = os.path.join(UPLOAD_FOLDER, unique_filename)
+        with open(save_path, 'wb') as f:
+            f.write(img_bytes)
+            
+        url = f"https://lmbot.pingpower.com.tw/uploads/{unique_filename}"
+        return jsonify({'ok': True, 'url': url})
+    except Exception as e:
+        logger.error(f"Image generation failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/generate/video', methods=['POST'])
+@login_required
+def api_generate_video():
+    try:
+        data = request.get_json() or {}
+        image_url = data.get('image_url', '').strip()
+        if not image_url:
+            return jsonify({'error': '請提供來源圖片 URL'}), 400
+            
+        # 下載圖片二進位 bytes
+        img_resp = req_lib.get(image_url, timeout=15)
+        img_resp.raise_for_status()
+        img_bytes = img_resp.content
+        
+        # 呼叫生影片封裝
+        video_bytes = hf_gen_video(img_bytes)
+        
+        # 儲存影片
+        UPLOAD_FOLDER = "/home/pipadmin/文件/uploads"
+        unique_filename = f"video_{uuid.uuid4().hex[:12]}.mp4"
+        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+        
+        save_path = os.path.join(UPLOAD_FOLDER, unique_filename)
+        with open(save_path, 'wb') as f:
+            f.write(video_bytes)
+            
+        url = f"https://lmbot.pingpower.com.tw/uploads/{unique_filename}"
+        return jsonify({'ok': True, 'url': url})
+    except Exception as e:
+        logger.error(f"Video generation failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 if __name__ == '__main__':
     logger.info("管理後台啟動：http://localhost:8888")
     app.run(host='127.0.0.1', port=8888, debug=False)
+

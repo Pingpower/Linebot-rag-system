@@ -329,3 +329,62 @@ def search_knowledge(company_id: str, query: str, limit: int = 3) -> list[dict]:
   - LINE Bot 錯誤日誌：`tail -f ~/my_project/flask.log`
   - 後台系統日誌：`tail -f ~/my_project/admin.log`
   - 穿透隧道日誌：`tail -f ~/my_project/cloudflared.log`
+
+---
+
+## 4. Hugging Face 模型管理與 AI 繪圖/影片生成指南
+
+本系統整合了雲端 Hugging Face Serverless Inference API 與本地 GGUF 模型管理，實現「不佔用本地顯卡記憶體（VRAM）進行 AI 繪圖與短影片生成」以及「在網頁端一鍵搜尋、下載與切換本地大語言模型」。
+
+### 4.1 Hugging Face API 憑證配置
+
+為了使用雲端加速的繪圖與影片生成服務，請依照以下步驟配置憑證：
+
+1. **申請 Hugging Face Token**
+   - 註冊並登入 [Hugging Face](https://huggingface.co/)。
+   - 前往 Settings -> Access Tokens，新增一個具有 Read 權限的 Token。
+2. **寫入環境變數**
+   - 開啟 `line_bot/.env` 或 `admin/.env`，加入以下環境變數設定：
+     ```ini
+     HF_TOKEN=your_huggingface_access_token_here
+     ```
+   - 系統後端將會自動讀取此 Token 並調用雲端 FLUX.1 (生圖) 與 SVD (生片) 模型。
+
+### 4.2 管理後台「模型市場」功能說明
+
+進入 Flask 管理後台，點選左側導覽列的 **「模型市場」**，即可進行以下操作：
+
+1. **GPU 與 VRAM 實時監控**
+   - 頂部儀表板每 5 秒自動讀取一次 `nvidia-smi` 數據。
+   - 當 VRAM 佔用率大於 85% 時，進度條會自動變為紅色，警告管理員暫勿載入過大模型以防 OOM (Out Of Memory)。
+2. **Hugging Face 模型搜尋與一鍵下載**
+   - 搜尋欄輸入關鍵字（例如 `qwen`、`llama`、`gemma`）可直接向 Hugging Face 查詢 GGUF 模型。
+   - 系統具備 **智慧推薦機制**：若是 1.5B/3B/7B/8B 量化模型，會標記綠色的「適合本機 (6GB)」徽章；其餘較大模型則會顯示警告徽章。
+   - 點選「選擇檔案」可查看該模型庫下的所有 GGUF 量化版本，點選「下載」後，系統會啟動背景執行緒（不阻礙網頁操作），並於左側的「背景下載任務」看板中即時呈現下載進度（%）與下載速度（MB/s）。
+3. **本地模型一鍵熱切換**
+   - 下載完成的模型會自動呈現在左側的「本地模型庫」列表中。
+   - 點選舊模型旁的「一鍵啟用」，後端會自動：
+     - 修改 `~/.config/systemd/user/linebot-llama.service` 中的模型檔案路徑。
+     - 執行 `systemctl --user daemon-reload`。
+     - 重啟 `linebot-llama` 服務，實現無縫模型切換。
+
+### 4.3 AI 生成體驗沙盒 (後台工具箱)
+
+在後台「模型市場」的第二個分頁中，提供管理員手動生成測試的沙盒：
+
+- **AI 智慧繪圖 (FLUX.1-schnell)**：輸入中文或英文提示詞，點選「開始繪圖」，約 3 秒即可生成並呈現高清圖片。
+- **一鍵儲存為公司資產**：生成的圖片自動儲存於伺服器 `uploads/` 目錄，管理員可一鍵複製其外網連結，直接在「公司管理」中設定為官方圖文資產，作為 LINE Bot 動態 Flex 圖卡推送。
+- **AI 影片生成 (SVD)**：直接將生成的圖片 URL 傳送至影片生成器，約 10 秒即可取得一段約 3-4 秒的 MP4 短影片。
+
+### 4.4 LINE Bot 端的 AI 多媒體指令
+
+LINE Bot 已經原生整合了這項雲端生成能力，一般使用者可在 LINE 聊天室中輸入以下指令直接互動：
+
+1. **繪圖指令 (`/draw` 或 `/畫圖`)**
+   - **格式**：`/draw 提示詞` 或 `/畫圖 提示詞`
+   - **範例**：`/draw 一隻在太空中漂浮的太空貓`
+   - **行為**：Bot 會調用 FLUX.1 生成圖片，回傳圖片訊息給用戶，並同時提示用戶可將此圖轉為影片。系統會將此圖片 URL 暫存在該用戶的對話記憶中。
+2. **影片生成指令 (`/video` 或 `/動起來`)**
+   - **格式**：`/video` 或 `/動起來`
+   - **行為**：系統會自動讀取該用戶最近一次生成的圖片網址，調用 SVD 模型將其轉換為動態影片，並回傳影片訊息至聊天室。
+   - **防禦處理**：若用戶最近沒有生成過圖片，系統會提示必須先使用 `/draw` 進行繪圖。

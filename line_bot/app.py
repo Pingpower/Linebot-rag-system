@@ -15,7 +15,9 @@ from linebot.v3.messaging import (
     ReplyMessageRequest,
     TextMessage,
     FlexMessage,
-    FlexContainer
+    FlexContainer,
+    ImageMessage,
+    VideoMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
@@ -445,10 +447,104 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
         except Exception as e2:
             logger.error({"msg": "Final fallback reply failed", "error": str(e2)})
 
+# 用戶最後生成的圖片 URL 記錄，便於一鍵轉影片
+user_last_image = {}
+
+def reply_text(company: dict, reply_token: str, text: str):
+    """簡便的純文字回覆輔助函數"""
+    try:
+        config = Configuration(access_token=company['line_access_token'])
+        with ApiClient(config) as api_client:
+            MessagingApi(api_client).reply_message_with_http_info(
+                ReplyMessageRequest(
+                    reply_token=reply_token,
+                    messages=[TextMessage(text=text)]
+                )
+            )
+    except Exception as e:
+        logger.error({"msg": "reply_text failed", "error": str(e)})
+
 
 def handle_text_event(company: dict, user_id: str, reply_token: str, user_message: str):
     """RAG + LLM 推理 + LINE 回覆"""
+    
+    # ── 攔截 AI 生圖與生片指令 ──
+    msg_lower = user_message.lower().strip()
+    if msg_lower.startswith("/draw ") or msg_lower.startswith("/畫圖 "):
+        prompt = user_message[6:].strip()
+        if not prompt:
+            reply_text(company, reply_token, "請輸入繪圖提示詞，例如：/draw 一隻戴著墨鏡的貓")
+            return
+            
+        try:
+            import sys
+            if "/home/pipadmin/文件" not in sys.path:
+                sys.path.append("/home/pipadmin/文件")
+            from admin.hf_api import generate_image
+            
+            img_url = generate_image(prompt)
+            if img_url:
+                user_last_image[user_id] = img_url
+                
+                config = Configuration(access_token=company['line_access_token'])
+                with ApiClient(config) as api_client:
+                    MessagingApi(api_client).reply_message_with_http_info(
+                        ReplyMessageRequest(
+                            reply_token=reply_token,
+                            messages=[
+                                ImageMessage(original_content_url=img_url, preview_image_url=img_url),
+                                TextMessage(text=f"✨ 這是為您生成的圖片！\n指令: {prompt}\n\n💡 提示：輸入「/video」或「/動起來」可以將此圖片轉為短影片喔！")
+                            ]
+                        )
+                    )
+                return
+            else:
+                reply_text(company, reply_token, "抱歉，圖片生成失敗，請稍候重試。")
+                return
+        except Exception as e:
+            logger.error({"msg": "LINE /draw failed", "error": str(e)})
+            reply_text(company, reply_token, "抱歉，圖片生成服務目前不可用。")
+            return
+            
+    elif msg_lower == "/video" or msg_lower == "/動起來":
+        img_url = user_last_image.get(user_id)
+        if not img_url:
+            reply_text(company, reply_token, "您最近沒有生成過圖片喔！請先使用「/draw 您的指令」生成一張圖片。")
+            return
+            
+        try:
+            import sys
+            if "/home/pipadmin/文件" not in sys.path:
+                sys.path.append("/home/pipadmin/文件")
+            from admin.hf_api import generate_video
+            
+            video_url = generate_video(img_url)
+            if video_url:
+                config = Configuration(access_token=company['line_access_token'])
+                with ApiClient(config) as api_client:
+                    MessagingApi(api_client).reply_message_with_http_info(
+                        ReplyMessageRequest(
+                            reply_token=reply_token,
+                            messages=[
+                                VideoMessage(
+                                    original_content_url=video_url, 
+                                    preview_image_url=img_url,
+                                    tracking_id=f"vid_{user_id[:8]}"
+                                ),
+                                TextMessage(text="🎬 您的動態短影片已生成完成！")
+                            ]
+                        )
+                    )
+                return
+            else:
+                reply_text(company, reply_token, "抱歉，影片生成失敗（可能 Hugging Face 佇列擁擠），請稍候重試。")
+                return
+        except Exception as e:
+            logger.error({"msg": "LINE /video failed", "error": str(e)})
+            reply_text(company, reply_token, "抱歉，影片生成服務目前不可用。")
+            return
 
+    # ── 正常 RAG + LLM 對話流程 ──
     # 1. 搜尋知識庫
     docs = search_knowledge(company['id'], user_message)
 
