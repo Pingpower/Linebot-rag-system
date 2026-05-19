@@ -9,22 +9,45 @@
   <!-- 頂部 GPU / VRAM 監控儀表板 -->
   <div class="card mb-4 gpu-monitor-card">
     <div class="card-header">
-      <div class="card-title">🖥️ 顯示卡 (GPU) 與顯存 (VRAM) 狀態監控</div>
+      <div class="card-title">🖥️ 系統資源與顯示卡 (CPU/RAM/GPU) 狀態監控</div>
       <span class="badge" id="gpu-name-badge" style="background: rgba(99, 102, 241, 0.15); color: var(--primary);">偵測中...</span>
     </div>
     <div class="card-body" style="padding: 20px;">
-      <div class="vram-progress-wrapper">
-        <div class="vram-info">
-          <span>顯存佔用：<strong id="vram-used-text">0 MB</strong> / <span id="vram-total-text">0 MB</span></span>
-          <span id="vram-percent-text" style="font-weight: 700;">0%</span>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 12px;">
+        <!-- CPU -->
+        <div class="monitor-item">
+          <div class="monitor-info" style="display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 13px;">
+            <span>🧠 處理器 (CPU) 使用率</span>
+            <span id="cpu-percent-text" style="font-weight: 700;">0%</span>
+          </div>
+          <div style="background: var(--bg); border-radius: 4px; height: 10px; overflow: hidden; border: 1px solid var(--border);">
+            <div id="cpu-progress-bar" style="width: 0%; height: 100%; background: var(--primary); transition: width 0.5s ease;"></div>
+          </div>
         </div>
-        <div class="vram-bar-container">
-          <div class="vram-bar" id="vram-progress-bar" style="width: 0%"></div>
+        <!-- RAM -->
+        <div class="monitor-item">
+          <div class="monitor-info" style="display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 13px;">
+            <span>💾 系統記憶體 (RAM)：<strong id="ram-used-text">0.0 GB</strong> / <span id="ram-total-text">0.0 GB</span></span>
+            <span id="ram-percent-text" style="font-weight: 700;">0%</span>
+          </div>
+          <div style="background: var(--bg); border-radius: 4px; height: 10px; overflow: hidden; border: 1px solid var(--border);">
+            <div id="ram-progress-bar" style="width: 0%; height: 100%; background: #10B981; transition: width 0.5s ease;"></div>
+          </div>
         </div>
-        <p class="hint" style="margin-top: 8px; color: var(--text-muted);">
-          ⚠️ <strong>本機顯卡為 GTX 1060 6GB</strong>。在執行本地語言模型時已佔用約 5.6GB 顯存。如要使用本地繪圖模型，必須先在下方暫停本地語言模型。
-        </p>
+        <!-- VRAM -->
+        <div class="monitor-item">
+          <div class="monitor-info" style="display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 13px;">
+            <span>⚡ 顯示記憶體 (VRAM)：<strong id="vram-used-text">0 MB</strong> / <span id="vram-total-text">0 MB</span></span>
+            <span id="vram-percent-text" style="font-weight: 700;">0%</span>
+          </div>
+          <div style="background: var(--bg); border-radius: 4px; height: 10px; overflow: hidden; border: 1px solid var(--border);">
+            <div id="vram-progress-bar" style="width: 0%; height: 100%; transition: width 0.5s ease;"></div>
+          </div>
+        </div>
       </div>
+      <p class="hint" style="color: var(--text-muted); font-size: 12px; margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; margin-bottom: 0;">
+        ⚠️ <strong>本機配備 GTX 1060 6GB</strong>。在執行本地語言模型時已佔用約 5.6GB 顯存。如要使用本地繪圖模型，必須先在下方暫停本地語言模型。
+      </p>
     </div>
   </div>
 
@@ -514,31 +537,59 @@
       document.getElementById(tabId).classList.add('active');
   }
 
-  // 獲取 GPU 資訊
+  // 獲取 CPU/RAM/GPU 資源資訊
   async function updateGPUInfo() {
       try {
           const res = await fetch('/api/system/gpu');
           const data = await res.json();
           if (data.error) return;
           
+          // 1. GPU / VRAM
           document.getElementById('gpu-name-badge').textContent = data.name || 'NVIDIA GPU';
           document.getElementById('vram-used-text').textContent = `${data.vram_used} MB`;
           document.getElementById('vram-total-text').textContent = `${data.vram_total} MB`;
           document.getElementById('vram-percent-text').textContent = `${data.vram_percent}%`;
           
-          const bar = document.getElementById('vram-progress-bar');
-          bar.style.width = `${data.vram_percent}%`;
+          const vramBar = document.getElementById('vram-progress-bar');
+          vramBar.style.width = `${data.vram_percent}%`;
           
           // 顯存警示色
           if (data.vram_percent > 85) {
-              bar.style.background = 'var(--danger)';
+              vramBar.style.background = 'var(--danger)';
           } else if (data.vram_percent > 65) {
-              bar.style.background = 'var(--warn)';
+              vramBar.style.background = 'var(--warn)';
           } else {
-              bar.style.background = 'linear-gradient(90deg, var(--primary) 0%, #818cf8 100%)';
+              vramBar.style.background = 'linear-gradient(90deg, var(--primary) 0%, #818cf8 100%)';
+          }
+          
+          // 2. CPU
+          document.getElementById('cpu-percent-text').textContent = `${data.cpu_percent}%`;
+          const cpuBar = document.getElementById('cpu-progress-bar');
+          cpuBar.style.width = `${data.cpu_percent}%`;
+          if (data.cpu_percent > 85) {
+              cpuBar.style.background = 'var(--danger)';
+          } else if (data.cpu_percent > 65) {
+              cpuBar.style.background = 'var(--warn)';
+          } else {
+              cpuBar.style.background = 'var(--primary)';
+          }
+          
+          // 3. RAM
+          document.getElementById('ram-used-text').textContent = `${data.ram_used} GB`;
+          document.getElementById('ram-total-text').textContent = `${data.ram_total} GB`;
+          document.getElementById('ram-percent-text').textContent = `${data.ram_percent}%`;
+          
+          const ramBar = document.getElementById('ram-progress-bar');
+          ramBar.style.width = `${data.ram_percent}%`;
+          if (data.ram_percent > 85) {
+              ramBar.style.background = 'var(--danger)';
+          } else if (data.ram_percent > 65) {
+              ramBar.style.background = 'var(--warn)';
+          } else {
+              ramBar.style.background = '#10B981';
           }
       } catch (err) {
-          console.error("Fetch VRAM failed:", err);
+          console.error("Fetch system metrics failed:", err);
       }
   }
 

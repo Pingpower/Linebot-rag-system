@@ -1221,26 +1221,65 @@ def delete_model():
 @login_required
 def api_system_gpu():
     try:
-        # 1. 取得 GPU 名稱
-        cmd_name = "nvidia-smi --query-gpu=name --format=csv,noheader"
-        gpu_name = subprocess.check_output(cmd_name, shell=True, text=True).strip()
-        
-        # 2. 取得 VRAM 用量
-        cmd_vram = "nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits"
-        out_vram = subprocess.check_output(cmd_vram, shell=True, text=True).strip()
-        
+        # 1. 取得 GPU 名稱與 VRAM 用量 (nvidia-smi)
+        gpu_name = "NVIDIA GPU"
         used, total = 0, 0
-        if out_vram:
-            parts = [p.strip() for p in out_vram.split(',')]
-            if len(parts) >= 2:
-                used = int(parts[0])
-                total = int(parts[1])
+        try:
+            cmd_name = "nvidia-smi --query-gpu=name --format=csv,noheader"
+            gpu_name = subprocess.check_output(cmd_name, shell=True, text=True).strip()
+            
+            cmd_vram = "nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits"
+            out_vram = subprocess.check_output(cmd_vram, shell=True, text=True).strip()
+            if out_vram:
+                parts = [p.strip() for p in out_vram.split(',')]
+                if len(parts) >= 2:
+                    used = int(parts[0])
+                    total = int(parts[1])
+        except Exception:
+            gpu_name = "NVIDIA GeForce GTX 1060 (模擬)"
+            
+        # 2. 取得 CPU 使用率 (/proc/stat)
+        cpu_percent = 0.0
+        try:
+            with open('/proc/stat', 'r') as f:
+                fields1 = [float(x) for x in f.readline().strip().split()[1:]]
+            time.sleep(0.05) # 50ms 延遲以計算 CPU 差值，不阻塞 Web 主線程
+            with open('/proc/stat', 'r') as f:
+                fields2 = [float(x) for x in f.readline().strip().split()[1:]]
+            idle1, total1 = fields1[3], sum(fields1)
+            idle2, total2 = fields2[3], sum(fields2)
+            idle_delta = idle2 - idle1
+            total_delta = total2 - total1
+            cpu_percent = round((1 - idle_delta / total_delta) * 100, 1) if total_delta > 0 else 0.0
+        except Exception:
+            pass
+            
+        # 3. 取得系統記憶體 (RAM) 使用量 (free -m)
+        ram_used_gb = 0.0
+        ram_total_gb = 0.0
+        ram_percent = 0.0
+        try:
+            out_ram = subprocess.check_output("free -m", shell=True, text=True)
+            lines = out_ram.strip().split('\n')
+            parts = lines[1].split()
+            total_ram_mb = int(parts[1])
+            available_ram_mb = int(parts[6]) if len(parts) >= 7 else int(parts[3])
+            used_ram_mb = total_ram_mb - available_ram_mb
+            ram_percent = round((used_ram_mb / total_ram_mb) * 100, 1) if total_ram_mb > 0 else 0.0
+            ram_used_gb = round(used_ram_mb / 1024, 1)
+            ram_total_gb = round(total_ram_mb / 1024, 1)
+        except Exception:
+            pass
                 
         return jsonify({
             'name': gpu_name,
             'vram_used': used,
             'vram_total': total,
-            'vram_percent': round((used / total) * 100, 1) if total > 0 else 0
+            'vram_percent': round((used / total) * 100, 1) if total > 0 else 0,
+            'cpu_percent': cpu_percent,
+            'ram_used': ram_used_gb,
+            'ram_total': ram_total_gb,
+            'ram_percent': ram_percent
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
