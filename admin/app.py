@@ -1273,6 +1273,54 @@ def api_models_download_status():
     return jsonify(DOWNLOAD_STATUS)
 
 
+def wait_for_llama_vram_clear(timeout=8):
+    """
+    Wait for the old llama-server to completely release VRAM from the GPU.
+    If nvidia-smi is available, it queries for running CUDA compute apps.
+    Falls back to a flat 3.0 second sleep if nvidia-smi is missing.
+    """
+    start_time = time.time()
+    logger.info("Starting wait_for_llama_vram_clear to avoid race conditions...")
+    nvidia_smi_available = False
+    
+    try:
+        res = subprocess.run("nvidia-smi -L", shell=True, capture_output=True, text=True)
+        if res.returncode == 0:
+            nvidia_smi_available = True
+    except Exception:
+        pass
+
+    if not nvidia_smi_available:
+        logger.info("nvidia-smi not available, sleeping for 3.0 seconds as fallback.")
+        time.sleep(3.0)
+        return True
+
+    while time.time() - start_time < timeout:
+        # Check if llama-server is still in GPU compute apps list
+        res = subprocess.run(
+            "nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader",
+            shell=True, capture_output=True, text=True
+        )
+        if "llama-server" not in res.stdout:
+            # Query used memory to ensure the OS and driver finished reclaiming VRAM
+            mem_res = subprocess.run(
+                "nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits",
+                shell=True, capture_output=True, text=True
+            )
+            try:
+                used_mem = int(mem_res.stdout.strip())
+                if used_mem < 2500: # Safe threshold (base GPU memory used by X/Gnome is ~300-600MB)
+                    logger.info(f"VRAM successfully released. Current GPU memory usage: {used_mem} MiB.")
+                    return True
+            except Exception:
+                logger.info("llama-server cleared from GPU compute apps. Proceeding.")
+                return True
+        time.sleep(0.5)
+
+    logger.warning("VRAM clear wait timed out, proceeding anyway to start engine.")
+    return False
+
+
 @app.route('/api/models/switch', methods=['POST'])
 @login_required
 def api_models_switch():
@@ -1363,7 +1411,7 @@ WantedBy=default.target
         subprocess.run("systemctl --user daemon-reload", shell=True, check=True)
         subprocess.run("systemctl --user stop linebot-llama", shell=True)
         subprocess.run("pkill -9 -f 'llama-server'", shell=True)
-        time.sleep(1)
+        wait_for_llama_vram_clear()
         subprocess.run("systemctl --user start linebot-llama", shell=True, check=True)
         
         # 4. 偵測引擎是否在 2.5 秒內崩潰，若崩潰則嘗試分析日誌並自動回滾
@@ -1396,7 +1444,7 @@ WantedBy=default.target
                 subprocess.run("systemctl --user daemon-reload", shell=True)
                 subprocess.run("systemctl --user stop linebot-llama", shell=True)
                 subprocess.run("pkill -9 -f 'llama-server'", shell=True)
-                time.sleep(1)
+                wait_for_llama_vram_clear()
                 subprocess.run("systemctl --user start linebot-llama", shell=True)
                 return jsonify({'error': f'{err_msg} 已自動回滾至先前工作的模型。'}), 400
             else:
@@ -1408,7 +1456,7 @@ WantedBy=default.target
                 subprocess.run("systemctl --user daemon-reload", shell=True)
                 subprocess.run("systemctl --user stop linebot-llama", shell=True)
                 subprocess.run("pkill -9 -f 'llama-server'", shell=True)
-                time.sleep(1)
+                wait_for_llama_vram_clear()
                 subprocess.run("systemctl --user start linebot-llama", shell=True)
                 
                 # 更新設定檔為安全參數
@@ -1524,10 +1572,11 @@ WantedBy=default.target
 
                     write_service_file(selected_path, threads, gpu_layers, ctx_size)
                     
+                    # 3. 重新載入 Systemd 並重啟服務
                     subprocess.run("systemctl --user daemon-reload", shell=True, check=True)
                     subprocess.run("systemctl --user stop linebot-llama", shell=True)
                     subprocess.run("pkill -9 -f 'llama-server'", shell=True)
-                    time.sleep(1)
+                    wait_for_llama_vram_clear()
                     subprocess.run("systemctl --user start linebot-llama", shell=True, check=True)
                     restarted = True
                     
@@ -1556,7 +1605,7 @@ WantedBy=default.target
                         subprocess.run("systemctl --user daemon-reload", shell=True)
                         subprocess.run("systemctl --user stop linebot-llama", shell=True)
                         subprocess.run("pkill -9 -f 'llama-server'", shell=True)
-                        time.sleep(1)
+                        wait_for_llama_vram_clear()
                         subprocess.run("systemctl --user start linebot-llama", shell=True)
                         return jsonify({'error': f'{err_msg} 已自動回滾至先前的微調配置。'}), 400
                         
