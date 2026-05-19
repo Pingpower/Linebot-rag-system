@@ -392,3 +392,66 @@ LINE Bot 已經原生整合了這項雲端生成能力，一般使用者可在 L
    - **格式**：`/video` 或 `/動起來`
    - **行為**：系統會自動讀取該用戶最近一次生成的圖片網址，調用 SVD 模型將其轉換為動態影片，並回傳影片訊息至聊天室。
    - **防禦處理**：若用戶最近沒有生成過圖片，系統會提示必須先使用 `/draw` 進行繪圖。
+
+### 4.5 跨機部署多媒體電腦：從雲端 API 切換至本地多媒體生成引擎 (Local Diffusion)
+
+當前本機 (GTX 1060 6GB) 由於顯存容量限制，繪圖與影片生成是採用 **Hugging Face Serverless Inference API (雲端加速)** 運行。這在當前主機上具有以下優勢：
+- **完全不佔用本地顯存與 GPU 算力**，無須擔心爆顯存。
+- 只需要配置 `HF_TOKEN` 憑證即可使用。
+
+當您未來建置另一台**多媒體專用電腦** (配備高階顯卡如 RTX 3090/4090 24GB VRAM) 時，若要轉為**純本地端繪圖與影片生成 (避免 API 速率限制與隱私洩漏)**，可採用以下本地化架構進行無縫切換：
+
+#### 4.5.1 本地端多媒體生成服務架構設計
+
+建議使用 **Stable Diffusion WebUI** 或 **ComfyUI** 作為本地多媒體推理後端，並開啟其 API 監聽服務。
+
+1. **安裝 ComfyUI/SD-WebUI (多媒體主機)**
+   - 下載 [ComfyUI](https://github.com/comfyanonymous/ComfyUI) 並安裝 CUDA 驅動。
+   - 下載相關模型權限並放置於 `models/checkpoints` (如 FLUX.1-dev, SDXL) 與 `models/clip` 中。
+2. **啟動 API 監聽埠**
+   - 啟動時加入 `--listen` 與 `--port 8188` 參數，使其可接受區域網路/本地端 HTTP API 請求。
+
+#### 4.5.2 系統代碼切換指引
+
+當本地多媒體推理服務器就緒後，請將 `line_bot/app.py` 中負責調用 Hugging Face 雲端繪圖與影片生成的介面，改為調用本地 API 端點：
+
+##### A. 繪圖切換 (FLUX 本地化 API 調用)
+
+```python
+# 原雲端 API 寫法 (利用 Hugging Face Serverless)
+# response = requests.post("https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell", ...)
+
+# 未來本地多媒體機 API 寫法 (調用本地 ComfyUI API)
+import json
+
+def generate_image_local(prompt, save_path):
+    # ComfyUI API 請求 json payload
+    payload = {
+        "prompt": {
+            "3": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": 806503, "steps": 20, "cfg": 8, "sampler_name": "euler",
+                    "scheduler": "normal", "denoise": 1,
+                    "model": ["4", 0], "positive": ["6", 0], "negative": ["7", 0], "latent_image": ["5", 0]
+                }
+            },
+            "4": { "class_type": "CheckpointLoaderSimple", "inputs": { "ckpt_name": "flux1-schnell.safetensors" } },
+            "6": { "class_type": "CLIPTextEncode", "inputs": { "text": prompt, "clip": ["4", 1] } },
+            # ... 餘下 ComfyUI 工作流節點
+        }
+    }
+    response = requests.post("http://localhost:8188/prompt", json=payload)
+    # 取得生成圖片並儲存至 save_path
+```
+
+##### B. 影片生成切換 (SVD 本地化 API 調用)
+
+本地影片生成可以使用 ComfyUI 內建的 `SVD_img2vid` 工作流進行渲染。
+```python
+# 將圖片二進位串流傳送給本地 ComfyUI 影片工作流
+# HTTP POST http://localhost:8188/upload/image 上傳來源圖
+# HTTP POST http://localhost:8188/prompt 觸發 SVD 推理並下載 MP4 檔案
+```
+
+透過此雙層架構設計，管理系統只需在 `.env` 中切換模式與 API 端點網址，即可在「極速雲端 API 模式」與「純本地私有化多媒體電腦模式」之間無縫平滑轉換，完美兼顧前期開發速度與後期硬體升級擴充性。
