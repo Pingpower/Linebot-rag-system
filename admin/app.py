@@ -1295,6 +1295,21 @@ def api_models_switch():
         with open(os.path.join(config_dir, "selected_model"), "w") as f:
             f.write(selected_path)
             
+        # 讀取微調設定檔
+        config_path = os.path.join(config_dir, "engine_config.json")
+        threads = 8
+        gpu_layers = 10
+        ctx_size = 8192
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as cf:
+                    cfg = json.load(cf)
+                    threads = int(cfg.get('threads', 8))
+                    gpu_layers = int(cfg.get('gpu_layers', 10))
+                    ctx_size = int(cfg.get('ctx_size', 8192))
+            except Exception:
+                pass
+            
         # 2. 更新 systemd 服務配置 (寫入最新 ExecStart)
         user_systemd = os.path.expanduser("~/.config/systemd/user")
         os.makedirs(user_systemd, exist_ok=True)
@@ -1311,9 +1326,9 @@ ExecStart=/home/pipadmin/文件/llama.cpp/build/bin/llama-server \\
     --model {selected_path} \\
     --host 127.0.0.1 \\
     --port 8080 \\
-    --ctx-size 8192 \\
-    --n-gpu-layers 10 \\
-    --threads 8 \\
+    --ctx-size {ctx_size} \\
+    --n-gpu-layers {gpu_layers} \\
+    --threads {threads} \\
     --parallel 2 \\
     --log-disable
 Restart=always
@@ -1339,6 +1354,106 @@ WantedBy=default.target
     except Exception as e:
         logger.error(f"Switch model failed: {e}")
         return jsonify({'error': f'切換模型失敗: {str(e)}'}), 500
+
+
+@app.route('/api/models/config', methods=['GET', 'POST'])
+@login_required
+def api_models_config():
+    config_dir = os.path.expanduser("~/.config/linebot")
+    config_path = os.path.join(config_dir, "engine_config.json")
+    os.makedirs(config_dir, exist_ok=True)
+    
+    # 預設設定
+    default_config = {
+        'threads': 8,
+        'gpu_layers': 10,
+        'ctx_size': 8192
+    }
+    
+    if request.method == 'GET':
+        config = default_config.copy()
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    user_config = json.load(f)
+                    config.update(user_config)
+            except Exception:
+                pass
+        return jsonify(config)
+        
+    elif request.method == 'POST':
+        try:
+            data = request.get_json() or {}
+            threads = int(data.get('threads', 8))
+            gpu_layers = int(data.get('gpu_layers', 10))
+            ctx_size = int(data.get('ctx_size', 8192))
+            
+            # 安全範圍檢查與防呆限制
+            if threads < 1 or threads > 64:
+                threads = 8
+            if gpu_layers < 0 or gpu_layers > 256:
+                gpu_layers = 10
+            if ctx_size < 512 or ctx_size > 65536:
+                ctx_size = 8192
+                
+            config = {
+                'threads': threads,
+                'gpu_layers': gpu_layers,
+                'ctx_size': ctx_size
+            }
+            
+            with open(config_path, 'w') as f:
+                json.dump(config, f)
+                
+            # 如果當前有已啟用的模型，立刻重啟以套用新參數
+            selected_model_path = os.path.join(config_dir, "selected_model")
+            restarted = False
+            if os.path.exists(selected_model_path):
+                with open(selected_model_path, 'r') as sf:
+                    selected_path = sf.read().strip()
+                if os.path.exists(selected_path):
+                    user_systemd = os.path.expanduser("~/.config/systemd/user")
+                    service_path = os.path.join(user_systemd, "linebot-llama.service")
+                    
+                    service_content = f"""[Unit]
+Description=LINE Bot LLaMA Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pipadmin/文件
+ExecStart=/home/pipadmin/文件/llama.cpp/build/bin/llama-server \\
+    --model {selected_path} \\
+    --host 127.0.0.1 \\
+    --port 8080 \\
+    --ctx-size {ctx_size} \\
+    --n-gpu-layers {gpu_layers} \\
+    --threads {threads} \\
+    --parallel 2 \\
+    --log-disable
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/pipadmin/文件/llama.log
+StandardError=append:/home/pipadmin/文件/llama.log
+Environment=HOME=/home/pipadmin
+
+[Install]
+WantedBy=default.target
+"""
+                    with open(service_path, "w") as f:
+                        f.write(service_content)
+                    
+                    subprocess.run("systemctl --user daemon-reload", shell=True, check=True)
+                    subprocess.run("systemctl --user stop linebot-llama", shell=True)
+                    subprocess.run("pkill -9 -f 'llama-server'", shell=True)
+                    time.sleep(1)
+                    subprocess.run("systemctl --user start linebot-llama", shell=True, check=True)
+                    restarted = True
+                    
+            return jsonify({'ok': True, 'restarted': restarted, 'msg': '微調配置已成功儲存並套用！'})
+        except Exception as e:
+            logger.error(f"Save engine config failed: {e}")
+            return jsonify({'error': f'儲存微調配置失敗: {str(e)}'}), 500
 
 
 @app.route('/api/models/delete', methods=['POST'])
