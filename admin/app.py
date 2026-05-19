@@ -1092,12 +1092,39 @@ def api_models_search():
         return jsonify({'error': str(e)}), 500
 
 
+def _is_file_suitable(file_size_bytes, vram_gb):
+    file_size_gb = file_size_bytes / (1024 * 1024 * 1024)
+    # 過濾小於 10MB 的 dummy 檔案
+    if file_size_gb < 0.01:
+        return False
+    if vram_gb <= 0:  # 純 CPU
+        return file_size_gb <= 6.5
+    elif vram_gb <= 6.5:
+        return file_size_gb <= 8.0
+    elif vram_gb <= 12.5:
+        return file_size_gb <= 14.0
+    elif vram_gb <= 16.5:
+        return file_size_gb <= 19.0
+    else:
+        return file_size_gb <= 32.0
+
+
 @app.route('/api/models/files')
 @login_required
 def api_models_files():
     model_id = request.args.get('model_id', '').strip()
     if not model_id:
         return jsonify({'error': '缺少 model_id'}), 400
+        
+    # 取得本機 GPU 總顯存大小 (VRAM)
+    vram_total_gb = 0.0
+    try:
+        cmd_vram = "nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits"
+        out_vram = subprocess.check_output(cmd_vram, shell=True, text=True).strip()
+        if out_vram:
+            vram_total_gb = float(out_vram) / 1024.0
+    except Exception:
+        pass
         
     url = f"https://huggingface.co/api/models/{model_id}/tree/main"
     try:
@@ -1108,10 +1135,13 @@ def api_models_files():
         gguf_files = []
         for f in files:
             path = f.get('path', '')
+            size = f.get('size', 0)
             if path.endswith('.gguf'):
+                suitable = _is_file_suitable(size, vram_total_gb)
                 gguf_files.append({
                     'name': path,
-                    'size_formatted': f"{round(f.get('size', 0) / (1024*1024*1024), 2)} GB" if f.get('size') else "未知"
+                    'size_formatted': f"{round(size / (1024*1024*1024), 2)} GB" if size else "未知",
+                    'suitable': suitable
                 })
         return jsonify(gguf_files)
     except Exception as e:

@@ -720,15 +720,26 @@
               return;
           }
           
-          container.innerHTML = files.map(f => `
-              <div class="modal-file-item">
-                  <div>
-                      <strong style="font-size: 13px; color: var(--text); word-break: break-all;">${f.name}</strong>
-                      <div class="text-sm text-muted">大小: ${f.size_formatted}</div>
+          container.innerHTML = files.map(f => {
+              const warningBadge = !f.suitable 
+                  ? `<span class="badge badge-warning" style="background-color: rgba(220,53,69,0.15); color: #dc3545; font-size: 11px; margin-left: 8px; border: 1px solid rgba(220,53,69,0.3); padding: 2px 6px; border-radius: 4px;">⚠️ 恐超顯存極限 / 執行卡頓</span>` 
+                  : `<span class="badge badge-success" style="background-color: rgba(40,167,69,0.15); color: #28a745; font-size: 11px; margin-left: 8px; border: 1px solid rgba(40,167,69,0.3); padding: 2px 6px; border-radius: 4px;">適合本機</span>`;
+              const downloadBtn = !f.suitable
+                  ? `<button class="btn btn-secondary btn-sm" style="background: rgba(255,255,255,0.05); color: var(--text-muted); cursor: not-allowed;" disabled>不建議</button>`
+                  : `<button class="btn btn-primary btn-sm" onclick="triggerDownload('${modelId}', '${f.name}')">下載</button>`;
+              return `
+                  <div class="modal-file-item" style="opacity: ${f.suitable ? 1 : 0.65}; padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; justify-content: space-between; align-items: center;">
+                      <div>
+                          <strong style="font-size: 13px; color: var(--text); word-break: break-all;">${f.name}</strong>
+                          <div class="text-sm text-muted" style="display: flex; align-items: center; gap: 4px; margin-top: 4px;">
+                              大小: ${f.size_formatted}
+                              ${warningBadge}
+                          </div>
+                      </div>
+                      ${downloadBtn}
                   </div>
-                  <button class="btn btn-primary btn-sm" onclick="triggerDownload('${modelId}', '${f.name}')">下載</button>
-              </div>
-          `).join('');
+              `;
+          }).join('');
       } catch (err) {
           container.innerHTML = '<div class="text-red">請求檔案清單失敗</div>';
       }
