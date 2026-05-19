@@ -973,18 +973,34 @@ def models_explore():
 def _get_model_size_billion(model_id):
     import re
     model_id_lower = model_id.lower()
+    
+    # 1. 優先匹配 MoE 格式，例如 8x7b, 8x22b, 4x8b
+    moe_match = re.search(r'(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*b', model_id_lower)
+    if moe_match:
+        try:
+            experts = int(moe_match.group(1))
+            expert_size = float(moe_match.group(2))
+            # 估算 MoE 總容量 (通常為 expert 乘積的 80% ~ 85% 左右，以 0.85 安全估算)
+            return experts * expert_size * 0.85
+        except ValueError:
+            pass
+
+    # 2. 匹配常規 7b, 8b, 14b, 1.5b 等
     matches = re.findall(r'(\d+(?:\.\d+)?)\s*b', model_id_lower)
     if matches:
         try:
             return float(matches[-1])
         except ValueError:
             pass
+            
+    # 3. 匹配 500m 等極小模型
     matches_m = re.findall(r'(\d+(?:\.\d+)?)\s*m', model_id_lower)
     if matches_m:
         try:
             return float(matches_m[-1]) / 1000.0
         except ValueError:
             pass
+            
     return 7.0
 
 
