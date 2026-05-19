@@ -28,6 +28,26 @@
     </div>
   </div>
 
+  <!-- Hugging Face API 憑證配置卡片 -->
+  <div class="card mb-4" style="background: rgba(251, 191, 36, 0.03); border: 1px solid rgba(251, 191, 36, 0.2);">
+    <div class="card-header" style="border-bottom: 1px solid rgba(251, 191, 36, 0.15); display: flex; justify-content: space-between; align-items: center;">
+      <div class="card-title">🔑 Hugging Face 雲端 API 憑證配置</div>
+      <span class="badge" id="hf-status-badge" style="background: rgba(245, 158, 11, 0.15); color: var(--warn);">偵測中...</span>
+    </div>
+    <div class="card-body" style="padding: 20px;">
+      <div style="display: flex; flex-direction: column; gap: 10px;">
+        <p class="hint" style="color: var(--text-muted); margin-bottom: 5px;">
+          系統使用 Hugging Face 的 Serverless Inference API 進行雲端生圖 (FLUX.1) 與生影片 (SVD)。請輸入您的 Hugging Face <b>Read Access Token</b> (格式如 <code>hf_xxxxxxxxxxxxxxxx</code>)。
+        </p>
+        <div style="display: flex; gap: 10px; align-items: center; width: 100%;">
+          <input type="password" id="hf-token-input" placeholder="請貼上您的 hf_xxxxxxxxxxxxxxxx 憑證" style="flex: 1; padding: 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); outline: none;">
+          <button class="btn btn-outline" id="btn-toggle-hf" onclick="toggleHFVisibility()" style="white-space: nowrap; padding: 10px 15px;">👁️ 顯示</button>
+          <button class="btn btn-primary" onclick="saveHFToken()" style="white-space: nowrap; padding: 10px 20px;">儲存金鑰</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="layout-grid">
     <!-- 左側：本地已下載模型與切換 -->
     <div class="grid-left">
@@ -476,6 +496,7 @@
       updateGPUInfo();
       setInterval(updateGPUInfo, 5000); // 每 5 秒更新一次 VRAM 用量
       searchHFModels();
+      loadHFTokenStatus();
   });
 
   // 頁籤切換
@@ -849,6 +870,75 @@
       navigator.clipboard.writeText(videoUrl).then(() => {
           alert("影片連結已成功複製！");
       });
+  }
+
+  // 載入 HF Token 配置狀態
+  async function loadHFTokenStatus() {
+      try {
+          const res = await fetch('/api/system/config');
+          const data = await res.json();
+          const badge = document.getElementById('hf-status-badge');
+          const input = document.getElementById('hf-token-input');
+          if (data.has_token) {
+              badge.textContent = "已配置";
+              badge.style.background = "rgba(34, 197, 94, 0.15)";
+              badge.style.color = "var(--success)";
+              input.placeholder = `已設定憑證：${data.masked_token} (輸入新值將會覆蓋)`;
+          } else {
+              badge.textContent = "未配置";
+              badge.style.background = "rgba(239, 68, 68, 0.15)";
+              badge.style.color = "var(--danger)";
+              input.placeholder = "尚未設定憑證，請輸入您的 hf_... 憑證";
+          }
+      } catch (err) {
+          console.error("Load HF token status failed:", err);
+      }
+  }
+
+  // 切換金鑰欄位顯示/隱藏
+  function toggleHFVisibility() {
+      const input = document.getElementById('hf-token-input');
+      const btn = document.getElementById('btn-toggle-hf');
+      if (input.type === 'password') {
+          input.type = 'text';
+          btn.textContent = "🙈 隱藏";
+      } else {
+          input.type = 'password';
+          btn.textContent = "👁️ 顯示";
+      }
+  }
+
+  // 儲存 HF Token 到伺服器
+  async function saveHFToken() {
+      const input = document.getElementById('hf-token-input');
+      const token = input.value.trim();
+      if (!token) {
+          alert("請輸入有效的 Hugging Face 憑證！");
+          return;
+      }
+      if (!token.startsWith('hf_')) {
+          if (!confirm("警告：標準的 Hugging Face 憑證通常以 'hf_' 開頭，您確要儲存目前的憑證嗎？")) {
+              return;
+          }
+      }
+
+      try {
+          const res = await fetch('/api/system/config', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ hf_token: token })
+          });
+          const data = await res.json();
+          if (data.error) {
+              alert(`儲存失敗: ${data.error}`);
+          } else {
+              alert(data.msg);
+              input.value = "";
+              loadHFTokenStatus();
+          }
+      } catch (err) {
+          alert("請求儲存金鑰失敗，請稍候重試！");
+      }
   }
 </script>
 

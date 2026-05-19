@@ -1177,6 +1177,79 @@ def api_system_gpu():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/system/config', methods=['GET'])
+@login_required
+def get_system_config():
+    try:
+        env_path = os.path.join(os.path.dirname(__file__), '../line_bot/.env')
+        hf_token = ""
+        if os.path.exists(env_path):
+            with open(env_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip().startswith('HF_TOKEN='):
+                        parts = line.strip().split('=', 1)
+                        if len(parts) > 1:
+                            hf_token = parts[1].strip().strip('"').strip("'")
+        
+        masked_token = ""
+        if hf_token:
+            if len(hf_token) > 8:
+                masked_token = hf_token[:4] + "*" * (len(hf_token) - 8) + hf_token[-4:]
+            else:
+                masked_token = "****"
+        return jsonify({
+            "has_token": bool(hf_token),
+            "masked_token": masked_token
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/system/config', methods=['POST'])
+@login_required
+def save_system_config():
+    try:
+        data = request.get_json() or {}
+        hf_token = data.get('hf_token', '').strip()
+        if not hf_token:
+            return jsonify({"error": "請提供有效的 token"}), 400
+            
+        env_path = os.path.join(os.path.dirname(__file__), '../line_bot/.env')
+        
+        lines = []
+        token_replaced = False
+        if os.path.exists(env_path):
+            with open(env_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                
+        new_lines = []
+        for line in lines:
+            if line.strip().startswith('HF_TOKEN='):
+                new_lines.append(f'HF_TOKEN="{hf_token}"\n')
+                token_replaced = True
+            else:
+                new_lines.append(line)
+                
+        if not token_replaced:
+            new_lines.append(f'\n# Hugging Face Access Token for image & video generation\nHF_TOKEN="{hf_token}"\n')
+            
+        with open(env_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_lines)
+        
+        # 更新當前執行環境變數，使 admin 服務免重啟立刻生效
+        os.environ["HF_TOKEN"] = hf_token
+        
+        # 重啟 linebot-flask 服務，讓 LINE Bot 也立刻讀取到新的環境變數
+        subprocess.run("systemctl --user restart linebot-flask", shell=True, check=True)
+        
+        return jsonify({"msg": "Hugging Face 憑證已儲存，且 LINE Bot 服務已成功重載！"})
+    except Exception as e:
+        logger.error(f"Save HF_TOKEN failed: {e}")
+        return jsonify({"error": f"儲存失敗: {str(e)}"}), 500
+
+
+
+
 @app.route('/api/generate/image', methods=['POST'])
 @login_required
 def api_generate_image():
