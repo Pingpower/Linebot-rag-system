@@ -139,7 +139,10 @@
       <div class="card mt-6">
         <div class="card-header">
           <div class="card-title">⏳ 背景下載任務</div>
-          <span class="badge" id="active-downloads-count" style="background: rgba(245, 158, 11, 0.15); color: var(--warn);">0 個任務</span>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span class="badge" id="active-downloads-count" style="background: rgba(245, 158, 11, 0.15); color: var(--warn);">0 個任務</span>
+            <button id="btn-clear-downloads" onclick="clearAllFinished()" style="display: none; font-size: 11px; padding: 3px 8px; border-radius: 4px; background: rgba(239, 68, 68, 0.08); color: var(--danger); border: 1px solid rgba(239, 68, 68, 0.25); cursor: pointer; transition: all .15s;">🗑️ 清除已完成</button>
+          </div>
         </div>
         <div class="card-body" style="padding: 16px;">
           <div class="download-tasks-list" id="download-tasks-list">
@@ -974,8 +977,15 @@
               return `
                   <div class="download-item">
                       <div class="download-header">
-                          <span style="word-break: break-all;">${fname}</span>
-                          <span style="color: ${barColor}">${task.percent}%</span>
+                          <span style="word-break: break-all; flex: 1; margin-right: 8px;">${fname}</span>
+                          <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
+                              <span style="color: ${barColor}">${task.percent}%</span>
+                              <button
+                                  onclick="clearTask('${k.replace(/'/g, "\\'")}', '${task.status}')"
+                                  title="${task.status === 'downloading' ? '取消下載任務' : '清除此任務記錄'}"
+                                  style="width: 20px; height: 20px; border-radius: 50%; border: 1px solid rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); color: var(--danger); cursor: pointer; font-size: 13px; line-height: 1; display: flex; align-items: center; justify-content: center; transition: all .15s; padding: 0;"
+                              >&times;</button>
+                          </div>
                       </div>
                       <div class="download-progress-bar-container">
                           <div class="download-progress-bar" style="width: ${task.percent}%; background-color: ${barColor}"></div>
@@ -987,18 +997,56 @@
                   </div>
               `;
           }).join('');
+
           
-          // 如果所有任務都結束了 (completed / failed)，且確實有過下載任務，停止輪詢並動態刷新本地清單 (零刷新)
+          // Show/hide the "clear finished" button
+          const hasFinished = keys.some(k => tasks[k].status !== 'downloading');
+          const clearBtn = document.getElementById('btn-clear-downloads');
+          if (clearBtn) clearBtn.style.display = hasFinished ? 'inline-flex' : 'none';
+
+          // If all tasks are done (no downloading), stop polling and refresh local list
           const anyDownloading = keys.some(k => tasks[k].status === 'downloading');
           if (keys.length > 0 && !anyDownloading && downloadInterval) {
               clearInterval(downloadInterval);
               downloadInterval = null;
               setTimeout(() => {
                   reloadLocalModelsList();
-              }, 1500); // 1.5秒後刷新以確保磁碟寫入完成並被系統註冊
+              }, 1500);
           }
       } catch (err) {
           console.error("Poll progress failed:", err);
+      }
+  }
+
+  // Clear a single download task
+  async function clearTask(taskId, status) {
+      if (status === 'downloading') {
+          if (!confirm("此模型正在下載中，確定要取消下載並清除暫存檔嗎？")) {
+              return;
+          }
+      }
+      try {
+          const res = await fetch(`/api/models/download/clear?task_id=${encodeURIComponent(taskId)}`, { method: 'DELETE' });
+          const data = await res.json();
+          if (data.error) { alert(data.error); return; }
+          updateDownloadProgress(); // Refresh display immediately
+      } catch (err) {
+          console.error('clearTask failed:', err);
+      }
+  }
+
+  // Clear all completed/failed tasks at once
+  async function clearAllFinished() {
+      try {
+          const res = await fetch('/api/models/download/clear', { method: 'DELETE' });
+          const data = await res.json();
+          if (data.error) { alert(data.error); return; }
+          updateDownloadProgress();
+          // Hide the clear button if nothing remains
+          const clearBtn = document.getElementById('btn-clear-downloads');
+          if (clearBtn) clearBtn.style.display = 'none';
+      } catch (err) {
+          console.error('clearAllFinished failed:', err);
       }
   }
 

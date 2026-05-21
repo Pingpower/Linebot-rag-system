@@ -937,6 +937,8 @@ def _download_model_worker(model_id, download_url, save_path):
     retry_delay = 5
     
     for attempt in range(max_retries):
+        if model_id not in DOWNLOAD_STATUS:
+            return
         try:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             
@@ -972,20 +974,28 @@ def _download_model_worker(model_id, download_url, save_path):
 
             # 3. 若已下載大小大於等於遠端檔案大小，直接重新命名並完成
             if remote_total_size > 0 and existing_size >= remote_total_size:
+                if model_id not in DOWNLOAD_STATUS:
+                    try:
+                        if os.path.exists(temp_save_path):
+                            os.remove(temp_save_path)
+                    except:
+                        pass
+                    return
                 if os.path.exists(save_path):
                     try:
                         os.remove(save_path)
                     except:
                         pass
                 os.rename(temp_save_path, save_path)
-                DOWNLOAD_STATUS[model_id].update({
-                    "status": "completed",
-                    "percent": 100,
-                    "downloaded_mb": round(remote_total_size / (1024 * 1024), 1),
-                    "total_mb": round(remote_total_size / (1024 * 1024), 1),
-                    "speed": "0MB/s",
-                    "error": ""
-                })
+                if model_id in DOWNLOAD_STATUS:
+                    DOWNLOAD_STATUS[model_id].update({
+                        "status": "completed",
+                        "percent": 100,
+                        "downloaded_mb": round(remote_total_size / (1024 * 1024), 1),
+                        "total_mb": round(remote_total_size / (1024 * 1024), 1),
+                        "speed": "0MB/s",
+                        "error": ""
+                    })
                 return
 
             # 4. 準備 HTTP Range 請求
@@ -1008,13 +1018,22 @@ def _download_model_worker(model_id, download_url, save_path):
                 downloaded = 0
                 
             total_mb = round(total_size / (1024 * 1024), 1)
-            DOWNLOAD_STATUS[model_id]["total_mb"] = total_mb
+            if model_id in DOWNLOAD_STATUS:
+                DOWNLOAD_STATUS[model_id]["total_mb"] = total_mb
             
             start_time = time.time()
             chunk_downloaded_this_session = 0
             
             with open(temp_save_path, write_mode) as f:
                 for chunk in response.iter_content(chunk_size=512*1024):  # 512KB chunks
+                    if model_id not in DOWNLOAD_STATUS:
+                        logger.info(f"Download task {model_id} has been cancelled by user. Terminating download thread.")
+                        try:
+                            if os.path.exists(temp_save_path):
+                                os.remove(temp_save_path)
+                        except Exception as e:
+                            logger.error(f"Failed to remove temp file {temp_save_path}: {e}")
+                        return
                     if not chunk:
                         continue
                     f.write(chunk)
@@ -1027,14 +1046,23 @@ def _download_model_worker(model_id, download_url, save_path):
                     speed = round(session_downloaded_mb / elapsed, 2) if elapsed > 0 else 0
                     percent = int(100 * downloaded / total_size) if total_size > 0 else 0
                     
-                    DOWNLOAD_STATUS[model_id].update({
-                        "percent": percent,
-                        "downloaded_mb": downloaded_mb,
-                        "speed": f"{speed}MB/s",
-                        "error": ""
-                    })
+                    if model_id in DOWNLOAD_STATUS:
+                        DOWNLOAD_STATUS[model_id].update({
+                            "percent": percent,
+                            "downloaded_mb": downloaded_mb,
+                            "speed": f"{speed}MB/s",
+                            "error": ""
+                        })
                     
             # 5. 下載完成，重命名為正式檔名
+            if model_id not in DOWNLOAD_STATUS:
+                try:
+                    if os.path.exists(temp_save_path):
+                        os.remove(temp_save_path)
+                except Exception as e:
+                    logger.error(f"Failed to remove temp file {temp_save_path} on completion-cancellation: {e}")
+                return
+
             if os.path.exists(save_path):
                 try:
                     os.remove(save_path)
@@ -1042,11 +1070,19 @@ def _download_model_worker(model_id, download_url, save_path):
                     pass
             os.rename(temp_save_path, save_path)
             
-            DOWNLOAD_STATUS[model_id]["status"] = "completed"
+            if model_id in DOWNLOAD_STATUS:
+                DOWNLOAD_STATUS[model_id]["status"] = "completed"
             logger.info(f"Model {model_id} downloaded successfully to {save_path}")
             return
             
         except Exception as e:
+            if model_id not in DOWNLOAD_STATUS:
+                try:
+                    if os.path.exists(temp_save_path):
+                        os.remove(temp_save_path)
+                except:
+                    pass
+                return
             logger.error(f"Download attempt {attempt+1}/{max_retries} failed for {model_id}: {e}")
             if attempt == max_retries - 1:
                 DOWNLOAD_STATUS[model_id].update({
@@ -1355,6 +1391,39 @@ def api_models_download_status():
     if task_id:
         return jsonify(DOWNLOAD_STATUS.get(task_id, {'status': 'not_found'}))
     return jsonify(DOWNLOAD_STATUS)
+
+
+@app.route('/api/models/download/clear', methods=['DELETE'])
+@login_required
+def api_models_download_clear():
+    """Clear completed/failed download tasks from the status board.
+
+    - DELETE /api/models/download/clear          → clear all non-downloading tasks
+    - DELETE /api/models/download/clear?task_id=X → clear single task (refused if downloading)
+    """
+    global DOWNLOAD_STATUS
+    task_id = request.args.get('task_id', '').strip()
+
+    if task_id:
+        task = DOWNLOAD_STATUS.get(task_id)
+        if task is None:
+            return jsonify({'error': '找不到該任務'}), 404
+        if task.get('status') == 'downloading':
+            del DOWNLOAD_STATUS[task_id]
+            logger.info({"msg": "download task cancelled", "task_id": task_id})
+            return jsonify({'ok': True, 'msg': '已取消下載任務'})
+        del DOWNLOAD_STATUS[task_id]
+        logger.info({"msg": "download task cleared", "task_id": task_id})
+        return jsonify({'ok': True, 'msg': '已清除任務'})
+
+    # Clear all finished tasks (completed or failed)
+    finished = [k for k, v in DOWNLOAD_STATUS.items() if v.get('status') != 'downloading']
+    for k in finished:
+        del DOWNLOAD_STATUS[k]
+    logger.info({"msg": "download tasks cleared", "count": len(finished)})
+    return jsonify({'ok': True, 'msg': f'已清除 {len(finished)} 筆已完成/失敗任務'})
+
+
 
 
 def wait_for_llama_vram_clear(timeout=8):
