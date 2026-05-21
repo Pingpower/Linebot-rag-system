@@ -1532,9 +1532,12 @@ def api_models_switch():
         def write_service_file(m_path, t, g, c):
             extra_args = []
             m_path_lower = m_path.lower()
+            # MoE models benefit from --cpu-moe to keep expert routing on CPU
             if "moe" in m_path_lower or "a3b" in m_path_lower or "mixtral" in m_path_lower or "dbrx" in m_path_lower:
                 extra_args.append("--cpu-moe")
             extra_args.append("--no-mmap")
+            extra_args.append("--mlock")  # Lock model weights in RAM to prevent swap
+            extra_args.append("--flash-attn auto")  # Let llama.cpp auto-detect FA support (requires Volta+)
             extra_str = " ".join(extra_args)
             
             content = f"""[Unit]
@@ -1551,6 +1554,7 @@ ExecStart=/home/pipadmin/文件/llama.cpp/build/bin/llama-server \\
     --ctx-size {c} \\
     --n-gpu-layers {g} \\
     --threads {t} \\
+    --threads-batch {t} \\
     --parallel 2 \\
     {extra_str} \\
     --log-disable
@@ -1559,6 +1563,7 @@ RestartSec=10
 StandardOutput=append:/home/pipadmin/文件/llama.log
 StandardError=append:/home/pipadmin/文件/llama.log
 Environment=HOME=/home/pipadmin
+LimitMEMLOCK=infinity
 
 [Install]
 WantedBy=default.target
@@ -1575,10 +1580,24 @@ WantedBy=default.target
         wait_for_llama_vram_clear()
         subprocess.run("systemctl --user start linebot-llama", shell=True, check=True)
         
-        # 4. 偵測引擎是否在 2.5 秒內崩潰，若崩潰則嘗試分析日誌並自動回滾
-        time.sleep(2.5)
-        status_check = subprocess.run("systemctl --user is-active linebot-llama", shell=True, capture_output=True, text=True)
-        is_active = status_check.stdout.strip() == "active"
+        # 4. 偵測引擎是否成功載入模型並進入工作狀態 (輪詢 /health 端點，最長等待 40 秒)
+        is_active = False
+        import requests
+        for i in range(40):
+            # 檢查 systemd 服務是否仍在運行中，若已崩潰則直接退出
+            status_check = subprocess.run("systemctl --user is-active linebot-llama", shell=True, capture_output=True, text=True)
+            if status_check.stdout.strip() != "active":
+                break
+            try:
+                h_resp = requests.get("http://127.0.0.1:8080/health", timeout=1.0)
+                if h_resp.status_code == 200:
+                    h_data = h_resp.json()
+                    if h_data.get('status') == 'ok':
+                        is_active = True
+                        break
+            except Exception:
+                pass
+            time.sleep(1.0)
         
         if not is_active:
             err_msg = "模型啟動失敗，引擎進程已退出。"
@@ -1705,9 +1724,12 @@ def api_models_config():
                     def write_service_file(m_path, t, g, c):
                         extra_args = []
                         m_path_lower = m_path.lower()
+                        # MoE models benefit from --cpu-moe to keep expert routing on CPU
                         if "moe" in m_path_lower or "a3b" in m_path_lower or "mixtral" in m_path_lower or "dbrx" in m_path_lower:
                             extra_args.append("--cpu-moe")
                         extra_args.append("--no-mmap")
+                        extra_args.append("--mlock")  # Lock model weights in RAM to prevent swap
+                        extra_args.append("--flash-attn auto")  # Let llama.cpp auto-detect FA support (requires Volta+)
                         extra_str = " ".join(extra_args)
                         
                         content = f"""[Unit]
@@ -1724,6 +1746,7 @@ ExecStart=/home/pipadmin/文件/llama.cpp/build/bin/llama-server \\
     --ctx-size {c} \\
     --n-gpu-layers {g} \\
     --threads {t} \\
+    --threads-batch {t} \\
     --parallel 2 \\
     {extra_str} \\
     --log-disable
@@ -1732,6 +1755,7 @@ RestartSec=10
 StandardOutput=append:/home/pipadmin/文件/llama.log
 StandardError=append:/home/pipadmin/文件/llama.log
 Environment=HOME=/home/pipadmin
+LimitMEMLOCK=infinity
 
 [Install]
 WantedBy=default.target

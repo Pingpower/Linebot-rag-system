@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import logging
 from flask import Flask, request, abort, send_from_directory
@@ -180,6 +181,40 @@ def save_messages(company_id: str, user_id: str, user_msg: str, ai_msg: str):
     except Exception as e:
         logger.error({"msg": "save_messages failed", "error": str(e)})
 
+def _strip_markdown(text: str) -> str:
+    """Strip common Markdown formatting symbols so LINE plain-text messages look clean.
+
+    Handles: headings (#), bold/italic (*/_), horizontal rules (---/***),
+    inline code (`), fenced code blocks (```), and leading list bullets (*/- ).
+    """
+    if not text:
+        return text
+
+    # Remove fenced code blocks entirely — keep the inner content
+    text = re.sub(r'```[^\n]*\n([\s\S]*?)```', lambda m: m.group(1).strip(), text)
+
+    # Remove inline code backticks (keep the text inside)
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+
+    # Remove ATX headings (# ## ### etc.) — keep the heading text
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+
+    # Remove bold/italic markers: **text**, __text__, *text*, _text_
+    text = re.sub(r'\*{1,3}([^*\n]+)\*{1,3}', r'\1', text)
+    text = re.sub(r'_{1,3}([^_\n]+)_{1,3}', r'\1', text)
+
+    # Remove horizontal rules (--- / *** / ___)
+    text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
+
+    # Normalize list bullets: "* item" or "- item" → "• item"
+    text = re.sub(r'^[*\-]\s+', '• ', text, flags=re.MULTILINE)
+
+    # Collapse multiple blank lines into a single blank line
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    return text.strip()
+
+
 def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_reply: str, logo_url: str = None):
     """回覆 LINE 訊息，優先使用精美設計的 Flex Message，支援 [FLEX_CARD] 解析與自訂 Logo"""
     if not ai_reply or not ai_reply.strip():
@@ -300,10 +335,15 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
                         "uri": btn['uri']
                     }
                 else:
+                    # Ensure text matches label for consistent UX
+                    # (user sees label on button, text appears in chat when clicked)
+                    btn_text = btn.get('text', '') or ''
+                    if not btn_text.strip() or btn_text == '點擊後傳送的文字':
+                        btn_text = label
                     action = {
                         "type": "message",
                         "label": label,
-                        "text": btn.get('text', label)
+                        "text": btn_text
                     }
                 footer_buttons.append({
                     "type": "button",
@@ -583,7 +623,7 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
     assets_block += '  "title": "圖卡標題 (15字以內)",\n'
     assets_block += '  "text": "圖卡說明描述 (30字以內)",\n'
     assets_block += '  "buttons": [\n'
-    assets_block += '    {"label": "按鈕文字", "text": "點擊後傳送的文字", "uri": "點擊後開啟的網址，不開啟網址則不設定此欄位或設為 null"}\n'
+    assets_block += '    {"label": "按鈕上顯示的文字（用戶看到的）", "text": "點擊後傳送到聊天室的文字（建議與 label 相同，確保用戶體驗一致）", "uri": "點擊後開啟的網址，不開啟網址則不設定此欄位或設為 null"}\n'
     assets_block += '  ]\n'
     assets_block += "}\n"
     assets_block += "[/FLEX_CARD]\n"
@@ -648,6 +688,7 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
         if docs:
             context = "\n\n".join(f"【{d['title']}】\n{d['content']}" for d in docs)
             system_prompt += f"\n\n以下是公司相關資料，請優先參考：\n\n{context}"
+        system_prompt += "\n\n【回覆風格】請簡潔扼要地回答，控制在 150 字以內。直接給出重點資訊，不要重複問題、不要過多寒暄。"
 
     # 4. 組合 messages
     messages = [{"role": "system", "content": system_prompt}]
@@ -660,26 +701,29 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
             model="local-model",
             messages=messages,
             temperature=0.3, # lower temperature for factual RAG matching
-            max_tokens=2048  # Increased to allow thought trace + answer
+            max_tokens=512   # 512 tokens ≈ 300 字，客服回覆足夠且回應更快
         )
         ai_reply = resp.choices[0].message.content
-        
-        # Defensive check: if the main content is empty, try to get reasoning_content
+
+        # 1a. Fallback: some models (e.g. reasoning-distilled, uncensored variants) put
+        #     the actual response in reasoning_content instead of content
         if not ai_reply or not ai_reply.strip():
-            msg_obj = resp.choices[0].message
-            reasoning = getattr(msg_obj, 'reasoning_content', None)
-            if not reasoning and hasattr(msg_obj, 'model_extra') and msg_obj.model_extra:
-                reasoning = msg_obj.model_extra.get('reasoning_content')
-            if not reasoning:
-                try:
-                    reasoning = msg_obj.get('reasoning_content')
-                except:
-                    pass
-            
+            reasoning = getattr(resp.choices[0].message, 'reasoning_content', None)
             if reasoning and reasoning.strip():
-                ai_reply = f"[思考過程]\n{reasoning.strip()}"
-            else:
-                ai_reply = "抱歉，在我的知識庫中找不到與此問題相關的資訊。"
+                logger.info({"msg": "Using reasoning_content as fallback (content was empty)"})
+                ai_reply = reasoning
+
+        # 1b. Strip <think>...</think> blocks (reasoning models leak their chain-of-thought here)
+        if ai_reply:
+            ai_reply = re.sub(r'<think>[\s\S]*?</think>', '', ai_reply, flags=re.IGNORECASE).strip()
+
+        # 2. Defensive check: if content is still empty after all fallbacks and stripping
+        if not ai_reply or not ai_reply.strip():
+            logger.warning({"msg": "LLM returned empty content after all fallbacks", "model": "local-model"})
+            ai_reply = "抱歉，AI 回應異常（模型未產生有效回覆），請稍候重試或換個方式詢問。"
+
+        # 3. Clean up markdown symbols that look like garbage in LINE plain-text messages
+        ai_reply = _strip_markdown(ai_reply)
     except Exception as e:
         logger.error({"msg": "LLM request failed", "error": str(e)})
         ai_reply = "抱歉，AI 服務暫時無法使用，請稍後再試。"
