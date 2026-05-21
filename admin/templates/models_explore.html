@@ -141,7 +141,7 @@
           <div class="card-title">⏳ 背景下載任務</div>
           <div style="display: flex; align-items: center; gap: 8px;">
             <span class="badge" id="active-downloads-count" style="background: rgba(245, 158, 11, 0.15); color: var(--warn);">0 個任務</span>
-            <button id="btn-clear-downloads" onclick="clearAllFinished()" style="display: none; font-size: 11px; padding: 3px 8px; border-radius: 4px; background: rgba(239, 68, 68, 0.08); color: var(--danger); border: 1px solid rgba(239, 68, 68, 0.25); cursor: pointer; transition: all .15s;">🗑️ 清除已完成</button>
+            <button id="btn-clear-downloads" onclick="clearAllFinished()" style="display: none; font-size: 11px; padding: 3px 8px; border-radius: 4px; background: rgba(239, 68, 68, 0.08); color: var(--danger); border: 1px solid rgba(239, 68, 68, 0.25); cursor: pointer; transition: all .15s;">🗑️ 清除已完成任務</button>
           </div>
         </div>
         <div class="card-body" style="padding: 16px;">
@@ -974,25 +974,26 @@
                   barColor = "var(--danger)";
               }
               
-              return `
-                  <div class="download-item">
-                      <div class="download-header">
-                          <span style="word-break: break-all; flex: 1; margin-right: 8px;">${fname}</span>
-                          <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
-                              <span style="color: ${barColor}">${task.percent}%</span>
-                              <button
-                                  onclick="clearTask('${k.replace(/'/g, "\\'")}', '${task.status}')"
-                                  title="${task.status === 'downloading' ? '取消下載任務' : '清除此任務記錄'}"
-                                  style="width: 20px; height: 20px; border-radius: 50%; border: 1px solid rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); color: var(--danger); cursor: pointer; font-size: 13px; line-height: 1; display: flex; align-items: center; justify-content: center; transition: all .15s; padding: 0;"
-                              >&times;</button>
+               return `
+                  <div class="download-item" style="padding: 14px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 8px;">
+                      <div class="download-header" style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 0;">
+                          <span style="word-break: break-all; font-size: 13px; font-weight: 600; color: var(--text); flex: 1; text-align: left;">${fname}</span>
+                          <span style="color: ${barColor}; font-size: 13px; font-weight: 600; flex-shrink: 0;">${task.percent}%</span>
+                      </div>
+                      <div class="download-progress-bar-container" style="height: 6px; background: var(--border); border-radius: 99px; overflow: hidden; margin-bottom: 0;">
+                          <div class="download-progress-bar" style="height: 100%; width: ${task.percent}%; background-color: ${barColor}; transition: width .3s;"></div>
+                      </div>
+                      <div class="download-footer" style="display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+                          <div style="display: flex; align-items: center; gap: 6px;">
+                              <span style="color: ${barColor}; font-weight: 500;">● ${statusText}</span>
+                              <span>(${task.downloaded_mb}MB / ${task.total_mb}MB)</span>
                           </div>
-                      </div>
-                      <div class="download-progress-bar-container">
-                          <div class="download-progress-bar" style="width: ${task.percent}%; background-color: ${barColor}"></div>
-                      </div>
-                      <div class="download-footer">
-                          <span>${statusText}</span>
-                          <span>${task.downloaded_mb}MB / ${task.total_mb}MB</span>
+                          <button
+                              onclick="clearTask('${k.replace(/'/g, "\\'")}', '${task.status}')"
+                              style="padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; transition: all .15s; border: 1px solid ${task.status === 'downloading' ? 'rgba(239,68,68,0.35)' : 'rgba(255,255,255,0.15)'}; background: ${task.status === 'downloading' ? 'rgba(239,68,68,0.08)' : 'rgba(255,255,255,0.05)'}; color: ${task.status === 'downloading' ? 'var(--danger)' : 'var(--text-muted)'}; display: flex; align-items: center; gap: 4px; line-height: 1.2;"
+                          >
+                              ${task.status === 'downloading' ? '❌ 取消下載' : '🧹 清除任務'}
+                          </button>
                       </div>
                   </div>
               `;
