@@ -1503,22 +1503,58 @@ def api_models_switch():
             except Exception:
                 pass
                 
-        # 讀取微調設定檔
+        # 讀取微調設定檔以備份舊設定 (回滾用)
         config_path = os.path.join(config_dir, "engine_config.json")
-        threads = 8
-        gpu_layers = 10
-        ctx_size = 8192
         old_cfg = {'threads': 8, 'gpu_layers': 10, 'ctx_size': 8192}
         if os.path.exists(config_path):
             try:
                 with open(config_path, 'r') as cf:
-                    cfg = json.load(cf)
-                    threads = int(cfg.get('threads', 8))
-                    gpu_layers = int(cfg.get('gpu_layers', 10))
-                    ctx_size = int(cfg.get('ctx_size', 8192))
-                    old_cfg = cfg
+                    old_cfg = json.load(cf)
             except Exception:
                 pass
+
+        # 根據目標模型自動配置最佳硬體參數
+        m_name_lower = model_name.lower()
+        file_size_gb = 0
+        if os.path.exists(selected_path):
+            file_size_gb = os.path.getsize(selected_path) / (1024 * 1024 * 1024)
+            
+        # 預設分級
+        model_class = "large"
+        
+        # 1. 判斷是否為極小模型 (<=4B，如 Gemma-4 E4B 等，檔案大小或名稱匹配)
+        if any(kw in m_name_lower for kw in ["gemma-4", "4b", "3b", "2b", "gemma2-2b"]):
+            model_class = "tiny"
+        # 2. 判斷是否為中等模型 (7B - 9B 模型，像是 Llama 3 8B, Qwen3 8B, 或是檔名含 7b/8b/9b)
+        elif any(kw in m_name_lower for kw in ["8b", "7b", "9b", "gemma2-9b"]):
+            model_class = "medium"
+        # 3. 檔案大小 fallback 判斷 (檔案小於 6.5 GB 但剛好沒匹配到關鍵字)
+        elif file_size_gb > 0 and file_size_gb < 6.5:
+            # 如果是小檔案但非 tiny 檔名，歸類為 medium 以策安全
+            model_class = "medium"
+
+        if model_class == "tiny":
+            threads = 8
+            gpu_layers = 99
+            ctx_size = 8192
+            logger.info(f"Auto-configured tiny model config for {model_name}: threads=8, gpu_layers=99, ctx_size=8192")
+        elif model_class == "medium":
+            threads = 8
+            gpu_layers = 18
+            ctx_size = 4096
+            logger.info(f"Auto-configured medium model (7B-9B) config for {model_name}: threads=8, gpu_layers=18, ctx_size=4096")
+        else:
+            threads = 8
+            gpu_layers = 10
+            ctx_size = 4096
+            logger.info(f"Auto-configured large/MoE model config for {model_name}: threads=8, gpu_layers=10, ctx_size=4096")
+
+        # 儲存最佳化參數回 engine_config.json
+        try:
+            with open(config_path, 'w') as cf:
+                json.dump({'threads': threads, 'gpu_layers': gpu_layers, 'ctx_size': ctx_size}, cf)
+        except Exception as e:
+            logger.error(f"Failed to auto-save model config: {e}")
 
         # 1. 寫入 ~/.config/linebot/selected_model 紀錄檔
         with open(selected_model_file, "w") as f:

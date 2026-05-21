@@ -142,13 +142,17 @@ bash ~/文件/backup_env.sh
 bash ~/my_project/select_model.sh
 ```
 
-**操作步驟：**
+**操作步驟與自動化參數優化：**
 
 1. 腳本會自動掃描您在 `WORKSPACE/models/` 目錄下存放的所有 `.gguf` 檔案。
 2. 畫面會列出可用模型列表、檔案大小，以及當前正啟用的模型標記。
 3. 依照提示輸入對應的編號並按 Enter 鍵確認。
-4. 腳本會自動覆寫 `systemd` 服務配置檔中的模型路徑，並寫入選取紀錄至 `~/.config/linebot/selected_model`。
-5. 腳本會自動呼叫 `systemctl --user daemon-reload` 與 `systemctl --user restart linebot-llama` 重啟模型服務。
+4. **自動化硬體參數配置**：為了避免顯存溢出 (OOM) 或未妥善利用 GPU 加速，後台在切換模型時會進行**智慧型分級參數配置**並寫入 `engine_config.json`：
+   - **Tiny 模型 (如 Gemma-4 E4B 等 <= 4B 模型)**：自動配置為全 GPU 加速 (`gpu_layers = 99`)，上下文窗口為 `ctx_size = 8192`。
+   - **Medium 模型 (如 7B - 9B 模型，如 Llama 3 8B)**：自動配置為 `gpu_layers = 18`，上下文窗口限制在 `ctx_size = 4096` 以防 GTX 1060 (6GB) 顯存溢出。
+   - **Large/MoE 模型 (其他大模型)**：自動降為 `gpu_layers = 10`，`ctx_size = 4096`。
+5. 腳本會自動覆寫 `systemd` 服務配置檔中的模型路徑，並寫入選取紀錄至 `~/.config/linebot/selected_model`。
+6. 腳本會自動呼叫 `systemctl --user daemon-reload` 與 `systemctl --user restart linebot-llama` 重啟模型服務。
 
 #### 1.6.2 驗證更換狀態
 
@@ -215,6 +219,22 @@ LINE Bot (位於 `line_bot/app.py`) 整合了檢索增強生成 (RAG) 機制。�
 3. **載入公司資產：** 撈取該公司所設定的資產與變數（如官方網站、活動資訊）。
 4. **構建 Prompt：** 將檢索到的知識、公司資產與使用者的歷史對話合併，注入系統 Prompt 中。
 5. **本地 LLM 推理：** 調用 `llm_client` (對接 `http://127.0.0.1:8080/v1`)，在本地端取得回應，並將生成的內容透過 LINE Bot SDK 回覆給使用者。
+
+### 3.2 進階引導問答與原生 Flex Message (Carousel/Silent Card) 支援
+
+為了提供更佳的用戶體驗並解決字數被 LINE 截斷的問題，系統引入了引導式對話機制與原生 Flex Message 的混合解析功能：
+
+1. **引導式對話與 3 層深度硬限制**：
+   - 當面對資訊量龐大或步驟繁瑣的業務諮詢時，AI 不會一次性輸出所有內容，而是先進行簡短概述，並利用 `[FLEX_CARD]` 標記輸出互動引導按鈕。
+   - 為防止引導對話拖沓影響觀感，系統設定了**最多 3 層引導對話的硬限制**：在前兩層允許做關鍵字分流與按鈕引導，到了第三層（或是項目的分支終點），模型必須給予完全且詳細的答覆，禁止再輸出按鈕。
+2. **混合式 Flex Message 解析**：
+   - 系統支援原生官方的 LINE Flex Message 結構。當 `[FLEX_CARD]` 內的 JSON 包含官方原生的 `"type": "bubble"` 或 `"type": "carousel"` 時，解析引擎會直接套用 LINE SDK 原生渲染，此舉成功支援了**不帶按鈕的精緻 Silent Card** 以及**橫向滑動的 Carousel 輪播卡片**。
+   - 若為簡易格式（`imageUrl`, `buttons`），則自動套用預設的阿全村長紫色主題 Bubble。
+3. **對話歷史儲存乾淨化**：
+   - 寫入 Supabase 資料庫的對話歷史紀錄已全面進行「標籤與 Markdown 符號過濾」：系統會在儲存前將 `[FLEX_CARD]...[/FLEX_CARD]` 與 Markdown 星號 `**`、`##` 等符號完全抹除，確保儲存的文字紀錄百分之百乾淨，便於後台管理員檢視。
+4. **LLaMA Server 連線防崩潰保護**：
+   - 當 llama-server 尚未啟動或模型正在載入時，Python 後端對 LLM API 連線設有 try/catch 連線防崩潰機制，若連線失敗會自動回傳人性化提示（如「模型尚在載入中，請稍候再試」），避免後端直接崩潰或 LINE 無回應。
+
 
 #### 3.1.2 為什麼已經有資料庫檢索，AI 回答仍需要等待較長時間？
 

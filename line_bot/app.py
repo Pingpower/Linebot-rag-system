@@ -212,6 +212,10 @@ def _strip_markdown(text: str) -> str:
     # Collapse multiple blank lines into a single blank line
     text = re.sub(r'\n{3,}', '\n\n', text)
 
+    # Fallback defensive strip: strictly remove any remaining markdown signs
+    text = text.replace("**", "").replace("__", "")
+    text = text.replace("*", "").replace("_", "")
+
     return text.strip()
 
 
@@ -224,7 +228,7 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
         messages = []
         has_card = False
         card_data = None
-        main_text = ai_reply
+        main_text = ""
         
         start_tag = "[FLEX_CARD]"
         end_tag = "[/FLEX_CARD]"
@@ -233,9 +237,7 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
         end_idx = ai_reply.find(end_tag)
         
         if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-            has_card = True
             card_json_str = ai_reply[start_idx + len(start_tag) : end_idx].strip()
-            main_text = (ai_reply[:start_idx] + "\n" + ai_reply[end_idx + len(end_tag):]).strip()
             
             # 清理模型可能輸出的 markdown code block 包裝
             if card_json_str.startswith("```"):
@@ -247,12 +249,21 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
                     
             try:
                 card_data = json.loads(card_json_str)
+                has_card = True
+                main_text = (ai_reply[:start_idx] + "\n" + ai_reply[end_idx + len(end_tag):]).strip()
+                main_text = _strip_markdown(main_text)
             except Exception as pe:
                 logger.error({"msg": "Failed to parse FLEX_CARD JSON", "error": str(pe), "json": card_json_str})
                 has_card = False
+                
+        if not has_card:
+            # 解析失敗或沒有標籤，抹除所有的 [FLEX_CARD] 以防民眾看見
+            main_text = re.sub(r'\[FLEX_CARD\][\s\S]*?\[/FLEX_CARD\]', '', ai_reply).strip()
+            main_text = re.sub(r'\[FLEX_CARD\][\s\S]*', '', main_text).strip()
+            main_text = _strip_markdown(main_text)
         
         # 1. 處理普通對話文字
-        if main_text and main_text.strip():
+        if has_card and main_text and main_text.strip():
             messages.append(TextMessage(text=main_text))
             
         # 2. 建立 Header 樣式（包含 Logo 或預設 AI 機器人）
@@ -317,105 +328,124 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
                 }
             ]
             
-        # 3. 建立 FLEX_CARD 氣泡
+        # 3. 建立 FLEX_CARD 氣泡 (支援自訂原生官方 Flex 語法或簡易圖卡格式)
         if has_card and card_data:
-            image_url = card_data.get('imageUrl')
-            title = card_data.get('title', '推薦項目')
-            text = card_data.get('text', '')
-            buttons = card_data.get('buttons', [])
-            
-            footer_buttons = []
-            for btn in buttons:
-                label = btn.get('label', '了解更多')
-                action = {}
-                if btn.get('uri'):
-                    action = {
-                        "type": "uri",
-                        "label": label,
-                        "uri": btn['uri']
+            if isinstance(card_data, dict) and card_data.get('type') in ['bubble', 'carousel']:
+                try:
+                    flex_container = FlexContainer.from_json(json.dumps(card_data))
+                    alt_title = "推薦內容"
+                    # 試著從 body 取標題作為 alt text
+                    if card_data.get('type') == 'bubble':
+                        try:
+                            body_contents = card_data.get('body', {}).get('contents', [])
+                            for item in body_contents:
+                                if item.get('type') == 'text' and item.get('weight') == 'bold':
+                                    alt_title = item.get('text', alt_title)
+                                    break
+                        except:
+                            pass
+                    messages.append(FlexMessage(alt_text=alt_title, contents=flex_container))
+                except Exception as fe:
+                    logger.error({"msg": "Failed to parse native LINE Flex JSON, fallback to text", "error": str(fe)})
+                    has_card = False
+            else:
+                image_url = card_data.get('imageUrl')
+                title = card_data.get('title', '推薦項目')
+                text = card_data.get('text', '')
+                buttons = card_data.get('buttons', [])
+                
+                footer_buttons = []
+                for btn in buttons:
+                    label = btn.get('label', '了解更多')
+                    action = {}
+                    if btn.get('uri'):
+                        action = {
+                            "type": "uri",
+                            "label": label,
+                            "uri": btn['uri']
+                        }
+                    else:
+                        # Ensure text matches label for consistent UX
+                        # (user sees label on button, text appears in chat when clicked)
+                        btn_text = btn.get('text', '') or ''
+                        if not btn_text.strip() or btn_text == '點擊後傳送的文字':
+                            btn_text = label
+                        action = {
+                            "type": "message",
+                            "label": label,
+                            "text": btn_text
+                        }
+                    footer_buttons.append({
+                        "type": "button",
+                        "style": "primary",
+                        "color": "#4F46E5",
+                        "height": "sm",
+                        "action": action,
+                        "margin": "xs"
+                    })
+                
+                bubble = {
+                    "type": "bubble",
+                    "header": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "backgroundColor": "#4F46E5",
+                        "contents": header_contents,
+                        "paddingAll": "md"
                     }
-                else:
-                    # Ensure text matches label for consistent UX
-                    # (user sees label on button, text appears in chat when clicked)
-                    btn_text = btn.get('text', '') or ''
-                    if not btn_text.strip() or btn_text == '點擊後傳送的文字':
-                        btn_text = label
-                    action = {
-                        "type": "message",
-                        "label": label,
-                        "text": btn_text
+                }
+                
+                if image_url:
+                    bubble["hero"] = {
+                        "type": "image",
+                        "url": image_url,
+                        "size": "full",
+                        "aspectRatio": "20:13",
+                        "aspectMode": "cover"
                     }
-                footer_buttons.append({
-                    "type": "button",
-                    "style": "primary",
-                    "color": "#4F46E5",
-                    "height": "sm",
-                    "action": action,
-                    "margin": "xs"
-                })
-            
-            bubble = {
-                "type": "bubble",
-                "header": {
+                    
+                bubble["body"] = {
                     "type": "box",
                     "layout": "vertical",
-                    "backgroundColor": "#4F46E5",
-                    "contents": header_contents,
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": title,
+                            "weight": "bold",
+                            "size": "md",
+                            "color": "#1F2937"
+                        }
+                    ],
+                    "paddingAll": "lg"
+                }
+                if text:
+                    bubble["body"]["contents"].append({
+                        "type": "text",
+                        "text": text,
+                        "wrap": True,
+                        "size": "sm",
+                        "color": "#4B5563",
+                        "margin": "sm"
+                    })
+                    
+                bubble["footer"] = {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "xs",
+                    "contents": footer_buttons if footer_buttons else [
+                        {
+                            "type": "text",
+                            "text": "💡 提示：點擊按鈕獲取更多服務",
+                            "size": "xxs",
+                            "color": "#9CA3AF",
+                            "align": "center"
+                        }
+                    ],
                     "paddingAll": "md"
                 }
-            }
-            
-            if image_url:
-                bubble["hero"] = {
-                    "type": "image",
-                    "url": image_url,
-                    "size": "full",
-                    "aspectRatio": "20:13",
-                    "aspectMode": "cover"
-                }
                 
-            bubble["body"] = {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": title,
-                        "weight": "bold",
-                        "size": "md",
-                        "color": "#1F2937"
-                    }
-                ],
-                "paddingAll": "lg"
-            }
-            if text:
-                bubble["body"]["contents"].append({
-                    "type": "text",
-                    "text": text,
-                    "wrap": True,
-                    "size": "sm",
-                    "color": "#4B5563",
-                    "margin": "sm"
-                })
-                
-            bubble["footer"] = {
-                "type": "box",
-                "layout": "vertical",
-                "spacing": "xs",
-                "contents": footer_buttons if footer_buttons else [
-                    {
-                        "type": "text",
-                        "text": "💡 提示：點擊按鈕獲取更多服務",
-                        "size": "xxs",
-                        "color": "#9CA3AF",
-                        "align": "center"
-                    }
-                ],
-                "paddingAll": "md"
-            }
-            
-            flex_container = FlexContainer.from_json(json.dumps(bubble))
-            messages.append(FlexMessage(alt_text=f"推薦項目：{title}", contents=flex_container))
+                flex_container = FlexContainer.from_json(json.dumps(bubble))
+                messages.append(FlexMessage(alt_text=f"推薦項目：{title}", contents=flex_container))
             
         else:
             # 如果沒有 card 且 messages 長度為空 (沒有 main_text)，才使用原本的預設 Flex Bubble
@@ -435,7 +465,7 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
                     "contents": [
                       {
                         "type": "text",
-                        "text": ai_reply,
+                        "text": main_text,
                         "wrap": True,
                         "size": "md",
                         "color": "#1F2937"
@@ -619,7 +649,7 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
     assets_block += "```json\n"
     assets_block += "[FLEX_CARD]\n"
     assets_block += "{\n"
-    assets_block += '  "imageUrl": "圖片的 HTTPS URL，若無適合的圖片，請設為 null 或是留空，優先選用下方已上傳的資產圖片",\n'
+    assets_block += '  "imageUrl": "圖片的 HTTPS URL，若無適合 the 圖片，請設為 null 或是留空，優先選用下方已上傳的資產圖片",\n'.replace("the", "的")
     assets_block += '  "title": "圖卡標題 (15字以內)",\n'
     assets_block += '  "text": "圖卡說明描述 (30字以內)",\n'
     assets_block += '  "buttons": [\n'
@@ -628,6 +658,7 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
     assets_block += "}\n"
     assets_block += "[/FLEX_CARD]\n"
     assets_block += "```\n"
+    assets_block += "3. 進階選項（多樣化版面）：如果需要呈現多張橫向滑動的輪播卡片（Carousel）或是精美的不帶按鈕的靜態卡片（Silent Card），你可以直接在 `[FLEX_CARD]...[/FLEX_CARD]` 中輸出 LINE 原生官方 JSON 格式（即以 `{\"type\": \"bubble\"}` 或 `{\"type\": \"carousel\"}` 開頭的原生結構）。系統將會自動無縫解析，這能讓你的排版更豐富生動，不用被局限於上述的簡化按鈕圖卡中！\n"
 
     if assets:
         assets_block += "3. 用戶已上傳以下合法的圖文資產，當詢問相關問題或需要推薦這些服務時，請優先選用並套用以下資產寫法：\n"
@@ -681,14 +712,37 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
             "\n\n【重要安全指令】\n"
             "請「只」根據上面提供的「公司相關資料」回答問題。如果資料中沒有提到答案，或資料不足以完整回答，"
             "請一律直接回答「抱歉，在我的知識庫中找不到與此問題相關的資訊。」。\n"
-            "絕對不可使用你本身的通用知識編造任何資訊，不可與用戶閒聊、講笑話或進行任何與資料無關的對話。"
-        )
+            "絕對不可使用你本身的通用知識編造任何資訊，不可與用戶閒聊、講笑話或進行 any 與資料無關的對話。"
+        ).replace("any", "任何")
     else:
         # 正常 RAG 模式
         if docs:
             context = "\n\n".join(f"【{d['title']}】\n{d['content']}" for d in docs)
             system_prompt += f"\n\n以下是公司相關資料，請優先參考：\n\n{context}"
-        system_prompt += "\n\n【回覆風格】請簡潔扼要地回答，控制在 150 字以內。直接給出重點資訊，不要重複問題、不要過多寒暄。"
+
+    # 不論是否 strict_rag，皆套用統一的引導式排版與服務風格
+    style_instruction = (
+        "\n\n【引導式服務與回覆風格指令】\n"
+        "1. 你的角色是親切且主動的服務人員。當用戶詢問的業務資訊較多、步驟較繁複時（例如：申請資格、補助辦法等），**絕對不要一次吐出所有長篇大論的文字**以防截斷與民眾疲勞。但**引導對話最多只能進行 3 層（第 3 層必須完全且詳細地回答問題）**，不可拖得太長影響觀感。\n"
+        "2. 請先以 1-2 句話簡短概述核心或開場，然後**必須自行拼裝互動圖卡 [FLEX_CARD]**，提供引導式按鈕（如「申請資格」、「補助項目」等關鍵字）。請務必保證：第一層和第二層可以進行關鍵字引導與分類，但到了第三層（或是該分支的終點），必須提供完整詳細的解答，不得再用按鈕拖長對話。\n"
+        "3. 按鈕格式必須為：'label' 為按鈕顯示的文字，'text' 為用戶點擊後會自動發送回聊天室的文字。例如：\n"
+        "```json\n"
+        "[FLEX_CARD]\n"
+        "{\n"
+        "  \"imageUrl\": null,\n"
+        "  \"title\": \"業務申請指引\",\n"
+        "  \"text\": \"阿全村長為您整理了相關步驟，請點擊下方按鈕了解詳情：\",\n"
+        "  \"buttons\": [\n"
+        "    {\"label\": \"👉 申請資格\", \"text\": \"低收申請資格\"},\n"
+        "    {\"label\": \"💰 補助項目\", \"text\": \"低收補助項目\"},\n"
+        "    {\"label\": \"📄 應備文件\", \"text\": \"低收應備文件\"}\n"
+        "  ]\n"
+        "}\n"
+        "[/FLEX_CARD]\n"
+        "```\n"
+        "4. 回覆時，除了 [FLEX_CARD] 標籤內部，外部文字嚴禁保留任何 markdown 符號（如 ** 或 #），請保持排版乾淨、語氣溫和。"
+    )
+    system_prompt += style_instruction
 
     # 4. 組合 messages
     messages = [{"role": "system", "content": system_prompt}]
@@ -701,7 +755,7 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
             model="local-model",
             messages=messages,
             temperature=0.3, # lower temperature for factual RAG matching
-            max_tokens=512   # 512 tokens ≈ 300 字，客服回覆足夠且回應更快
+            max_tokens=1024  # Increased to 1024 to allow full RAG reasoning and complete responses without truncation
         )
         ai_reply = resp.choices[0].message.content
 
@@ -722,14 +776,17 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
             logger.warning({"msg": "LLM returned empty content after all fallbacks", "model": "local-model"})
             ai_reply = "抱歉，AI 回應異常（模型未產生有效回覆），請稍候重試或換個方式詢問。"
 
-        # 3. Clean up markdown symbols that look like garbage in LINE plain-text messages
-        ai_reply = _strip_markdown(ai_reply)
+        # 3. 取得乾淨的文字紀錄，用來儲存至對話歷史 (不含 FLEX_CARD JSON 且去除 Markdown)
+        clean_reply = re.sub(r'\[FLEX_CARD\][\s\S]*?\[/FLEX_CARD\]', '', ai_reply).strip()
+        clean_reply = re.sub(r'\[FLEX_CARD\][\s\S]*', '', clean_reply).strip()
+        clean_reply = _strip_markdown(clean_reply)
     except Exception as e:
         logger.error({"msg": "LLM request failed", "error": str(e)})
         ai_reply = "抱歉，AI 服務暫時無法使用，請稍後再試。"
+        clean_reply = ai_reply
 
     # 6. 儲存對話記錄
-    save_messages(company['id'], user_id, user_message, ai_reply)
+    save_messages(company['id'], user_id, user_message, clean_reply)
 
     # 7. 回覆 LINE
     config = Configuration(access_token=company['line_access_token'])
