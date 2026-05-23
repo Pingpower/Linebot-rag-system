@@ -1591,7 +1591,7 @@ ExecStart=/home/pipadmin/文件/llama.cpp/build/bin/llama-server \\
     --n-gpu-layers {g} \\
     --threads {t} \\
     --threads-batch {t} \\
-    --parallel 2 \\
+    --parallel 1 \\
     {extra_str} \\
     --log-disable
 Restart=always
@@ -1783,7 +1783,7 @@ ExecStart=/home/pipadmin/文件/llama.cpp/build/bin/llama-server \\
     --n-gpu-layers {g} \\
     --threads {t} \\
     --threads-batch {t} \\
-    --parallel 2 \\
+    --parallel 1 \\
     {extra_str} \\
     --log-disable
 Restart=always
