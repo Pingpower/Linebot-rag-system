@@ -10,7 +10,7 @@
 
 ---
 
-## 最新功能亮點 (2026-05-21 更新)
+## 最新功能亮點 (2026-05-23 更新)
 
 1. **混合式原生 Flex Message 渲染 (Silent Card / Carousel 輪播)**：
    - 系統現在完美相容 LINE 官方原生 Flex JSON。當 `[FLEX_CARD]` 標籤中包含 `"type": "bubble"` 或 `"type": "carousel"` 時，自動解析渲染，支援精巧的 Silent Card 與多張輪播橫滑卡片。
@@ -20,6 +20,8 @@
    - 管理後台在熱切換模型時，會自動依據模型大小（Tiny、Medium、Large）調整 `llama-server` 啟動參數（GPU 載入層數 `gpu_layers` 與 `ctx_size`），避免 6GB 顯卡 (GTX 1060) 顯存溢出，同時最大化加速小模型。
 4. **對話歷史乾淨化存檔**：
    - 儲存到 Supabase 的歷史紀錄會自動過濾 `[FLEX_CARD]` 內部 JSON 與所有 Markdown `**` 等符號，確保後台對話紀錄的純文字清晰易讀。
+5. **知識庫整理多模型 API 路由支援**：
+   - 後台上傳並結構化文檔（萃取知識條目）時，除了支援本地運行模型外，現在也能動態分流至 Google Gemini、NVIDIA NIM 或 OpenRouter 等外部高階 LLM API。極大提升了複雜長文檔在背景切分與整理的成效，且不佔用本地顯存資源。
 
 ---
 

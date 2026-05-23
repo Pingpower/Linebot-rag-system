@@ -620,7 +620,7 @@ def _search_web(query: str, max_results: int = 5) -> list[dict]:
 
 
 def _llm_extract(raw_text: str, hint: str = '') -> list[dict]:
-    """呼叫本地 LLM，從原始文字萃取知識條目 JSON"""
+    """呼叫配置的 LLM (本地/Gemini/NVIDIA NIM/OpenRouter)，從原始文字萃取知識條目 JSON"""
     prompt = f"""你是知識庫整理助手。請從以下文字中萃取出 2-3 個清晰的知識條目。
 {f'重點提示：{hint}' if hint else ''}
 
@@ -638,14 +638,50 @@ def _llm_extract(raw_text: str, hint: str = '') -> list[dict]:
 1. 嚴禁在 JSON 的字串值內部使用未逸出的雙引號。若字串值內有雙引號，必須寫成 \\\"。
 2. 請直接輸出 JSON 陣列，不要加入任何解釋文字或 Markdown 外殼包裝。"""
 
+    provider = os.getenv('KNOWLEDGE_LLM_PROVIDER', 'local').lower().strip()
+    headers = {'Content-Type': 'application/json'}
+
+    if provider == 'gemini':
+        api_key = os.getenv('GEMINI_API_KEY', '').strip()
+        if not api_key:
+            raise ValueError("設定了 Gemini 供應商，但在環境變數 (.env) 中未設定有效的 GEMINI_API_KEY")
+        model = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash').strip()
+        url = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
+        headers['Authorization'] = f'Bearer {api_key}'
+
+    elif provider == 'nvidia':
+        api_key = os.getenv('NVIDIA_NIM_API_KEY', '').strip()
+        if not api_key:
+            raise ValueError("設定了 NVIDIA NIM 供應商，但在環境變數 (.env) 中未設定有效的 NVIDIA_NIM_API_KEY")
+        model = os.getenv('NVIDIA_NIM_MODEL', 'meta/llama-3.1-405b-instruct').strip()
+        url = 'https://integrate.api.nvidia.com/v1/chat/completions'
+        headers['Authorization'] = f'Bearer {api_key}'
+
+    elif provider == 'openrouter':
+        api_key = os.getenv('OPENROUTER_API_KEY', '').strip()
+        if not api_key:
+            raise ValueError("設定了 OpenRouter 供應商，但在環境變數 (.env) 中未設定有效的 OPENROUTER_API_KEY")
+        model = os.getenv('OPENROUTER_MODEL', 'google/gemini-2.5-flash').strip()
+        url = 'https://openrouter.ai/api/v1/chat/completions'
+        headers['Authorization'] = f'Bearer {api_key}'
+        headers['HTTP-Referer'] = 'https://github.com/Pingpower/-linebot-rag-system'
+        headers['X-Title'] = 'Linebot RAG System'
+
+    else:
+        # local / default
+        model = 'local'
+        url = f'{LLAMA_URL}/v1/chat/completions'
+
     payload = {
-        'model': 'local',
+        'model': model,
         'messages': [{'role': 'user', 'content': prompt}],
         'temperature': 0.2,
         'max_tokens': 1200,
         'stream': False,
     }
-    resp = req_lib.post(f'{LLAMA_URL}/v1/chat/completions', json=payload, timeout=300)
+
+    logger.info(f"Extracting knowledge using LLM Provider: {provider} (model: {model})")
+    resp = req_lib.post(url, json=payload, headers=headers, timeout=300)
     resp.raise_for_status()
     raw_content = resp.json()['choices'][0]['message']['content'].strip()
 

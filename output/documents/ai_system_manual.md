@@ -476,3 +476,46 @@ def generate_image_local(prompt, save_path):
 ```
 
 透過此雙層架構設計，管理系統只需在 `.env` 中切換模式與 API 端點網址，即可在「極速雲端 API 模式」與「純本地私有化多媒體電腦模式」之間無縫平滑轉換，完美兼顧前期開發速度與後期硬體升級擴充性。
+
+---
+
+## 5. 知識庫處理多模型 API 支持與環境變數設定
+
+為了在處理長文本或複雜文件上傳時，避免受限於本地 8B 模型的理解力，本系統在**後台「AI 資料整理（知識萃取）」**階段，支持路由至多個外部 LLM API 供應商（Gemini、NVIDIA NIM、OpenRouter）。
+
+### 5.1 配置供應商環境變數
+
+請直接編輯 `line_bot/.env` 檔案，在尾端配置您要使用的供應商與對應金鑰：
+
+```ini
+# ============================================
+# 知識庫整理 (AI 蒐集) 模型供應商設定
+# 可選值: local | gemini | nvidia | openrouter (預設為 local)
+# ============================================
+KNOWLEDGE_LLM_PROVIDER="gemini"
+
+# 1. Google Gemini API
+# 前往 Google AI Studio 申請免費/付費 API Key
+GEMINI_API_KEY="AIzaSy..."
+GEMINI_MODEL="gemini-2.5-flash"  # 推薦型號，或 gemini-1.5-flash
+
+# 2. NVIDIA NIM API
+# 前往 NVIDIA Build 平台取得免費點數與金鑰
+NVIDIA_NIM_API_KEY="nvapi-..."
+NVIDIA_NIM_MODEL="meta/llama-3.1-405b-instruct"
+
+# 3. OpenRouter API
+# 可串接各家閉源及開源神模，支援多種付款方式
+OPENROUTER_API_KEY="sk-or-v1-..."
+OPENROUTER_MODEL="google/gemini-2.5-flash"
+```
+
+### 5.2 注意事項
+
+1. **服務重啟**：在手動修改 `.env` 檔案後，請在終端機執行重啟指令以套用設定：
+   ```bash
+   systemctl --user restart linebot-flask
+   ```
+2. **多租戶相容性**：此金鑰設定為全域（Global）設定，由管理員在後台伺服器設定，所有租戶在使用後台的「AI 萃取」功能時會統一使用該供應商。
+3. **錯誤排查**：如果設定了外部供應商（例如 `gemini`），但沒有提供對應的 API Key，後台在執行 AI 萃取時會回傳清楚的報錯提示，要求管理員確認金鑰配置。
+
