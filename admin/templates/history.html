@@ -1,0 +1,177 @@
+{% extends 'base.html' %}
+{% block title %}對話紀錄 — LINE Bot 後台{% endblock %}
+{% block page_title %}💬 對話紀錄 History{% endblock %}
+
+{% block content %}
+<div class="mb-4">
+  <form method="GET" action="{{ url_for('chat_history_view') }}" class="inline-form">
+    <label for="company_select">選擇合作企業：</label>
+    <select name="company_id" id="company_select" onchange="this.form.submit()">
+      {% for c in companies %}
+        <option value="{{ c.id }}" {% if selected and selected.id == c.id %}selected{% endif %}>{{ c.name }}</option>
+      {% endfor %}
+    </select>
+  </form>
+</div>
+
+{% if selected %}
+<div class="chat-container">
+  <!-- Left Panel: Users List -->
+  <aside class="chat-sidebar">
+    <div class="chat-sidebar-header">
+      活躍用戶 (最近 100 筆)
+    </div>
+    <div class="chat-user-list">
+      {% for u in users_list %}
+        <a href="{{ url_for('chat_history_view', company_id=selected.id, user_id=u.user_id) }}" 
+           class="chat-user-item {% if selected_user == u.user_id %}active{% endif %}">
+          <div class="chat-user-avatar">👤</div>
+          <div class="chat-user-info">
+            <div class="chat-user-id" title="{{ u.user_id }}">{{ u.user_id[:16] }}...</div>
+            <div class="chat-user-preview">{{ u.last_message }}</div>
+          </div>
+        </a>
+      {% else %}
+        <div class="text-center text-muted py-8">目前尚無對話記錄</div>
+      {% endfor %}
+    </div>
+  </aside>
+
+  <!-- Right Panel: Chat Messages -->
+  <main class="chat-main">
+    {% if selected_user %}
+      <div class="chat-main-header">
+        <span>對話詳情：<code>{{ selected_user }}</code></span>
+      </div>
+      <div class="chat-message-list">
+        {% for m in messages %}
+          <div class="chat-bubble-wrap {% if m.role == 'user' %}user{% else %}assistant{% endif %}">
+            <div class="chat-bubble">
+              <div class="chat-bubble-meta">
+                <span>{{ '用戶' if m.role == 'user' else 'AI 客服' }}</span>
+                <span>{{ m.created_at[11:19] }}</span>
+              </div>
+              <div class="chat-bubble-content">{{ m.content }}</div>
+              
+              <!-- Quick RAG Add Action -->
+              <div class="chat-bubble-actions">
+                <button class="btn-action-add" onclick="openAddModal('{{ m.role }}', '{{ m.content | replace("'", "\\'") | replace("\n", " ") }}')">
+                  💡 轉為知識庫條目
+                </button>
+              </div>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="chat-empty-state">
+        <div class="chat-empty-icon">💬</div>
+        <h3>請從左側選擇一個用戶以查看對話歷史</h3>
+        <p>在這裡您可以追蹤 AI 客服的解答情況，並針對有疑慮的對話一鍵修正加入知識庫！</p>
+      </div>
+    {% endif %}
+  </main>
+</div>
+
+<!-- Quick Add to RAG Modal -->
+<div id="add-modal" class="chat-modal-overlay">
+  <div class="chat-modal-card">
+    <div class="chat-modal-header">
+      <h3>💡 快速新增至知識庫</h3>
+      <button class="chat-modal-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="chat-modal-body">
+      <input type="hidden" id="modal-company-id" value="{{ selected.id }}">
+      <div class="form-group">
+        <label for="modal-title">知識庫問答標題 (Q)：</label>
+        <input type="text" id="modal-title" placeholder="例如：補助申請資格/退換貨辦法">
+      </div>
+      <div class="form-group">
+        <label for="modal-content">知識庫詳細解答內容 (A)：</label>
+        <textarea id="modal-content" rows="6" placeholder="請填寫此問題的標準詳細回答內容..."></textarea>
+      </div>
+      <div class="form-group">
+        <label for="modal-tags">分類標籤 (以逗號分隔)：</label>
+        <input type="text" id="modal-tags" placeholder="例如：補助, 資格, 說明">
+      </div>
+    </div>
+    <div class="chat-modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" onclick="submitModal()">確認儲存</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // 滾動對話列表到最底部
+  window.addEventListener('DOMContentLoaded', () => {
+    const list = document.querySelector('.chat-message-list');
+    if (list) {
+      list.scrollTop = list.scrollHeight;
+    }
+  });
+
+  const modal = document.getElementById('add-modal');
+  const modalTitle = document.getElementById('modal-title');
+  const modalContent = document.getElementById('modal-content');
+  const modalTags = document.getElementById('modal-tags');
+  const companyId = document.getElementById('modal-company-id')?.value;
+
+  function openAddModal(role, content) {
+    if (role === 'user') {
+      // 如果是用戶提問，作為 Title (Q) 的參考
+      modalTitle.value = content.length > 20 ? content.substring(0, 20) + '...' : content;
+      modalContent.value = '';
+    } else {
+      // 如果是 AI 回覆，作為 Content (A) 的參考
+      modalTitle.value = '';
+      modalContent.value = content;
+    }
+    modalTags.value = '對話修復';
+    modal.classList.add('active');
+  }
+
+  function closeModal() {
+    modal.classList.remove('active');
+  }
+
+  function submitModal() {
+    const title = modalTitle.value.strip ? modalTitle.value.strip() : modalTitle.value.trim();
+    const content = modalContent.value.strip ? modalContent.value.strip() : modalContent.value.trim();
+    const tags = modalTags.value;
+
+    if (!title || !content) {
+      alert('請填寫標題和解答內容！');
+      return;
+    }
+
+    fetch('/knowledge/add_from_history', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        company_id: companyId,
+        title: title,
+        content: content,
+        tags: tags
+      })
+    })
+    .then(res => res.json())
+    .then(data => {
+      if (data.ok) {
+        alert(data.msg);
+        closeModal();
+      } else {
+        alert('儲存失敗：' + data.error);
+      }
+    })
+    .catch(err => {
+      alert('請求失敗：' + err);
+    });
+  }
+</script>
+{% endblock %}

@@ -9,16 +9,34 @@
     <h2 class="card-title">選擇公司</h2>
   </div>
   <div style="padding:1rem 1.5rem">
-    <form method="GET" class="inline-form">
-      <select name="company_id" id="company_selector" onchange="this.form.submit()">
-        <option value="">-- 選擇公司 --</option>
-        {% for c in companies %}
-        <option value="{{ c.id }}" {% if selected and selected.id == c.id %}selected{% endif %}>
-          {{ c.name }} ({{ c.slug }})
-        </option>
-        {% endfor %}
-      </select>
-    </form>
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem">
+      <form method="GET" class="inline-form" style="margin-bottom:0">
+        <select name="company_id" id="company_selector" onchange="this.form.submit()">
+          <option value="">-- 選擇公司 --</option>
+          {% for c in companies %}
+          <option value="{{ c.id }}" {% if selected and selected.id == c.id %}selected{% endif %}>
+            {{ c.name }} ({{ c.slug }})
+          </option>
+          {% endfor %}
+        </select>
+      </form>
+      
+      {% if selected %}
+      <div style="display:flex; gap:0.75rem; align-items:center">
+        <a href="{{ url_for('knowledge_export', company_id=selected.id) }}" class="btn btn-outline btn-sm">
+          📥 匯出為 JSON
+        </a>
+        
+        <form action="{{ url_for('knowledge_import') }}" method="POST" enctype="multipart/form-data" id="import-form" style="display:flex; align-items:center; margin-bottom:0">
+          <input type="hidden" name="company_id" value="{{ selected.id }}">
+          <input type="file" name="file" id="import-file-input" accept=".json,.csv" style="display:none" onchange="document.getElementById('import-form').submit()">
+          <button type="button" class="btn btn-outline btn-sm" onclick="document.getElementById('import-file-input').click()">
+            📤 批次匯入 (.json / .csv)
+          </button>
+        </form>
+      </div>
+      {% endif %}
+    </div>
   </div>
 </div>
 
@@ -49,6 +67,12 @@
         <label>網址 URL</label>
         <input type="url" id="ai-url-input" placeholder="https://example.com/about"
                style="font-family:monospace">
+      </div>
+      <div style="margin-top:0.75rem; font-size:0.82rem; color:#94a3b8; display:flex; align-items:flex-start; gap:0.4rem; padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.02); border-radius: 6px; border: 1px solid rgba(255,255,255,0.05); margin-bottom: 1.25rem;">
+        <span style="font-size:1rem; margin-top:-0.15rem">💡</span>
+        <span style="line-height:1.4">
+          <b>提示</b>：系統已支援通用目錄下探。若網頁採用 JavaScript 動態載入（如 Kendo UI 列表），爬蟲將無法抓取未渲染之內容。如遇此情況，建議直接輸入<b>特定申辦說明頁的詳細 URL</b>，或複製網頁文字並使用<b>「貼入文字」</b>模式匯入。
+        </span>
       </div>
       <!-- Subpage Detection Block -->
       <div id="subpage-detector-block" style="display:none; margin-top:1.5rem; padding:1.25rem; background:rgba(255,255,255,0.03); border:1px solid rgba(165,180,252,0.2); border-radius:12px">

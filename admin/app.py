@@ -45,6 +45,171 @@ PLAN_LIMITS = {
     'enterprise': {'label': 'Enterprise', 'limit': 99999, 'color': '#8b5cf6'},
 }
 
+# ── System Metrics Cache & Background Thread ──────────────────────────────────
+import threading
+import time
+
+SYSTEM_METRICS_CACHE = {
+    'model': '無 / 未啟動',
+    'ram': '未知',
+    'vram': '未知',
+    'vram_used': 0,
+    'vram_total': 0,
+    'vram_percent': 0.0,
+    'cpu_percent': 0.0,
+    'ram_used_gb': 0.0,
+    'ram_total_gb': 0.0,
+    'ram_percent': 0.0,
+    'gpu_name': 'NVIDIA GPU',
+    'status': '離線 (已停止)',
+    'status_color': '#ef4444'
+}
+
+def _update_system_metrics_worker():
+    """Background worker to periodically update system metrics cache without blocking Flask."""
+    logger.info("Background system metrics update thread started.")
+    last_idle, last_total = 0.0, 0.0
+    try:
+        with open('/proc/stat', 'r') as f:
+            fields = [float(x) for x in f.readline().strip().split()[1:]]
+            last_idle, last_total = fields[3], sum(fields)
+    except Exception:
+        pass
+
+    while True:
+        try:
+            # 1. Detect LLaMA engine status
+            try:
+                cmd_status = "systemctl --user is-active linebot-llama"
+                sys_status = subprocess.check_output(cmd_status, shell=True, text=True).strip()
+            except subprocess.CalledProcessError as e:
+                sys_status = e.output.strip() if e.output else "inactive"
+
+            llama_url = os.getenv('LLAMA_SERVER_URL', 'http://127.0.0.1:8080')
+            status = '離線 (已停止)'
+            status_color = '#ef4444'
+
+            if sys_status == "activating":
+                status = '啟動中 (加載中)'
+                status_color = '#f59e0b'
+            elif sys_status == "active":
+                try:
+                    resp = req_lib.get(f"{llama_url}/health", timeout=2)
+                    if resp.status_code == 200:
+                        status = '在線 (正常運作)'
+                        status_color = '#22c55e'
+                    elif resp.status_code == 503 or "Loading model" in resp.text:
+                        status = '載入模型中...'
+                        status_color = '#f59e0b'
+                    else:
+                        status = f'異常 (HTTP {resp.status_code})'
+                        status_color = '#ef4444'
+                except req_lib.exceptions.ConnectionError:
+                    status = '啟動中 (載入引擎)...'
+                    status_color = '#f59e0b'
+                except Exception:
+                    status = '異常'
+                    status_color = '#ef4444'
+            else:
+                status = '離線 (已停止)'
+                status_color = '#ef4444'
+
+            # 2. Get active model name
+            model_name = '無 / 未啟動'
+            try:
+                cmd_model = "ps -ef | grep '[l]lama-server' | grep -oP '(?<=--model ).*?(?=\\s|$)' || echo ''"
+                out_model = subprocess.check_output(cmd_model, shell=True, text=True).strip()
+                if out_model:
+                    model_name = out_model.split('/')[-1]
+            except Exception:
+                pass
+
+            # 3. Get CPU usage
+            cpu_percent = 0.0
+            try:
+                with open('/proc/stat', 'r') as f:
+                    fields = [float(x) for x in f.readline().strip().split()[1:]]
+                idle, total = fields[3], sum(fields)
+                idle_delta = idle - last_idle
+                total_delta = total - last_total
+                if total_delta > 0:
+                    cpu_percent = round((1 - idle_delta / total_delta) * 100, 1)
+                last_idle, last_total = idle, total
+            except Exception:
+                pass
+
+            # 4. Get System RAM
+            ram_str = '未知'
+            ram_used_gb = 0.0
+            ram_total_gb = 0.0
+            ram_percent = 0.0
+            try:
+                out_ram = subprocess.check_output("free -m", shell=True, text=True)
+                lines = out_ram.strip().split('\n')
+                parts = lines[1].split()
+                total_ram_mb = int(parts[1])
+                available_ram_mb = int(parts[6]) if len(parts) >= 7 else int(parts[3])
+                used_ram_mb = total_ram_mb - available_ram_mb
+                ram_percent = round((used_ram_mb / total_ram_mb) * 100, 1) if total_ram_mb > 0 else 0.0
+                ram_used_gb = round(used_ram_mb / 1024, 1)
+                ram_total_gb = round(total_ram_mb / 1024, 1)
+                ram_str = f"{ram_used_gb}GiB / {ram_total_gb}GiB"
+            except Exception:
+                pass
+
+            # 5. Get GPU VRAM
+            vram_str = '未知'
+            vram_used = 0
+            vram_total = 0
+            vram_percent = 0.0
+            gpu_name = "NVIDIA GPU"
+            try:
+                try:
+                    cmd_gpu_name = "nvidia-smi --query-gpu=name --format=csv,noheader"
+                    gpu_name = subprocess.check_output(cmd_gpu_name, shell=True, text=True).strip()
+                except Exception:
+                    gpu_name = "NVIDIA GeForce GTX 1060 (模擬)"
+
+                cmd_vram = "nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits"
+                out_vram = subprocess.check_output(cmd_vram, shell=True, text=True).strip()
+                if out_vram:
+                    parts = [p.strip() for p in out_vram.split(',')]
+                    if len(parts) >= 2:
+                        vram_used = int(parts[0])
+                        vram_total = int(parts[1])
+                        vram_percent = round((vram_used / vram_total) * 100, 1) if vram_total > 0 else 0.0
+                        vram_str = f"{vram_used}MB / {vram_total}MB"
+            except Exception:
+                vram_str = "0MB / 6144MB"
+                vram_total = 6144
+
+            # Update cache
+            global SYSTEM_METRICS_CACHE
+            SYSTEM_METRICS_CACHE.update({
+                'model': model_name,
+                'ram': ram_str,
+                'vram': vram_str,
+                'vram_used': vram_used,
+                'vram_total': vram_total,
+                'vram_percent': vram_percent,
+                'cpu_percent': cpu_percent,
+                'ram_used_gb': ram_used_gb,
+                'ram_total_gb': ram_total_gb,
+                'ram_percent': ram_percent,
+                'gpu_name': gpu_name,
+                'status': status,
+                'status_color': status_color
+            })
+        except Exception as e:
+            logger.error(f"Error in background system metrics thread: {e}")
+
+        time.sleep(3.0)  # Update every 3 seconds
+
+# Start background thread immediately when app is loaded
+metrics_thread = threading.Thread(target=_update_system_metrics_worker, daemon=True)
+metrics_thread.start()
+
+
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 def login_required(f):
@@ -110,69 +275,14 @@ def unique_users(company_id):
     return r.data if isinstance(r.data, int) else 0
 
 def get_server_metrics():
-    metrics = {
-        'model': '無 / 未啟動',
-        'ram': '未知',
-        'vram': '未知',
-        'status': '離線',
-        'status_color': '#ef4444'
+    global SYSTEM_METRICS_CACHE
+    return {
+        'model': SYSTEM_METRICS_CACHE.get('model', '無 / 未啟動'),
+        'ram': SYSTEM_METRICS_CACHE.get('ram', '未知'),
+        'vram': SYSTEM_METRICS_CACHE.get('vram', '未知'),
+        'status': SYSTEM_METRICS_CACHE.get('status', '離線'),
+        'status_color': SYSTEM_METRICS_CACHE.get('status_color', '#ef4444')
     }
-    try:
-        # 1. 檢測 LLaMA 引擎服務狀態
-        try:
-            cmd_status = "systemctl --user is-active linebot-llama"
-            sys_status = subprocess.check_output(cmd_status, shell=True, text=True).strip()
-        except subprocess.CalledProcessError as e:
-            # systemctl is-active returns non-zero when inactive/failed
-            sys_status = e.output.strip() if e.output else "inactive"
-
-        llama_url = os.getenv('LLAMA_SERVER_URL', 'http://127.0.0.1:8080')
-        
-        if sys_status == "activating":
-            metrics['status'] = '啟動中 (加載中)'
-            metrics['status_color'] = '#f59e0b'  # warn
-        elif sys_status == "active":
-            try:
-                # 測試 HTTP 連線健康度
-                resp = req_lib.get(f"{llama_url}/health", timeout=2)
-                if resp.status_code == 200:
-                    metrics['status'] = '在線 (正常運作)'
-                    metrics['status_color'] = '#22c55e'  # success
-                elif resp.status_code == 503 or "Loading model" in resp.text:
-                    metrics['status'] = '載入模型中...'
-                    metrics['status_color'] = '#f59e0b'  # warn
-                else:
-                    metrics['status'] = f'異常 (HTTP {resp.status_code})'
-                    metrics['status_color'] = '#ef4444'  # danger
-            except req_lib.exceptions.ConnectionError:
-                # 服務雖然 active，但 port 還沒開，代表正在初始化載入引擎
-                metrics['status'] = '啟動中 (載入引擎)...'
-                metrics['status_color'] = '#f59e0b'
-            except Exception:
-                metrics['status'] = '異常'
-                metrics['status_color'] = '#ef4444'
-        else:
-            metrics['status'] = '離線 (已停止)'
-            metrics['status_color'] = '#ef4444'
-
-        # 2. 獲取當前運行的模型名稱
-        cmd_model = "ps -ef | grep '[l]lama-server' | grep -oP '(?<=--model ).*?(?=\\s|$)' || echo ''"
-        out_model = subprocess.check_output(cmd_model, shell=True, text=True).strip()
-        if out_model:
-            metrics['model'] = out_model.split('/')[-1]
-            
-        # 3. 獲取系統 RAM 用量
-        cmd_ram = "free -h | awk '/^Mem:/ {print $3 \" / \" $2}'"
-        metrics['ram'] = subprocess.check_output(cmd_ram, shell=True, text=True).strip()
-        
-        # 4. 獲取 GPU VRAM 用量
-        cmd_vram = "nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits | awk -F',' '{print $1 \"MB / \" $2 \"MB\"}'"
-        out_vram = subprocess.check_output(cmd_vram, shell=True, text=True).strip()
-        if out_vram:
-            metrics['vram'] = out_vram
-    except Exception as e:
-        logger.error(f"Error getting server metrics: {e}")
-    return metrics
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -407,6 +517,231 @@ def company_toggle(company_id):
     return jsonify({'ok': True, 'is_active': not company['is_active']})
 
 
+# ── Chat History (對話紀錄) ──────────────────────────────────────────────────
+
+@app.route('/history')
+@login_required
+def chat_history_view():
+    companies = get_companies()
+    selected_id = request.args.get('company_id')
+    
+    # 防呆：若未選定公司且存在公司列表，自動選擇第一家並重定向
+    if not selected_id and companies:
+        return redirect(url_for('chat_history_view', company_id=companies[0]['id']))
+        
+    selected_user = request.args.get('user_id', '').strip()
+    
+    users_list = []
+    messages = []
+    selected = None
+    
+    if selected_id:
+        selected = get_company(selected_id)
+        
+        # 1. 取得該公司有對話的最近用戶清單
+        try:
+            res = sb.table('chat_history') \
+                .select('*') \
+                .eq('company_id', selected_id) \
+                .order('created_at', desc=True) \
+                .limit(200) \
+                .execute()
+            
+            all_logs = res.data or []
+            
+            # 用戶分組邏輯 (保留最新的一筆作預覽)
+            seen_users = {}
+            for log in all_logs:
+                uid = log.get('user_id')
+                if not uid:
+                    continue
+                if uid not in seen_users:
+                    seen_users[uid] = {
+                        'user_id': uid,
+                        'last_message': log.get('content', '')[:30],
+                        'last_time': log.get('created_at'),
+                        'role': log.get('role')
+                    }
+            users_list = list(seen_users.values())
+        except Exception as e:
+            logger.error(f"Failed to fetch chat history users: {e}")
+            
+        # 2. 取得選定用戶的對話詳情
+        if selected_user:
+            try:
+                res_msgs = sb.table('chat_history') \
+                    .select('*') \
+                    .eq('company_id', selected_id) \
+                    .eq('user_id', selected_user) \
+                    .order('created_at', desc=False) \
+                    .execute()
+                messages = res_msgs.data or []
+            except Exception as e:
+                logger.error(f"Failed to fetch chat messages for user {selected_user}: {e}")
+                
+    return render_template('history.html', companies=companies, selected=selected,
+                           users_list=users_list, messages=messages, selected_user=selected_user)
+
+
+@app.route('/knowledge/add_from_history', methods=['POST'])
+@login_required
+def knowledge_add_from_history():
+    try:
+        data = request.get_json() or {}
+        company_id = data.get('company_id')
+        title = data.get('title', '').strip()
+        content = data.get('content', '').strip()
+        tags_str = data.get('tags', '').strip()
+        
+        if not company_id or not title or not content:
+            return jsonify({'error': '缺少必要欄位'}), 400
+            
+        tags = [t.strip() for t in tags_str.split(',') if t.strip()] if tags_str else []
+        
+        sb.table('knowledge_base').insert({
+            'company_id': company_id,
+            'title': title,
+            'content': content,
+            'tags': tags,
+            'is_active': True
+        }).execute()
+        
+        return jsonify({'ok': True, 'msg': '已成功將對話轉為知識庫條目！'})
+    except Exception as e:
+        logger.error(f"Failed to add knowledge from history: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/knowledge/export')
+@login_required
+def knowledge_export():
+    try:
+        company_id = request.args.get('company_id')
+        if not company_id:
+            return "缺少公司 ID", 400
+            
+        comp_res = sb.table('companies').select('name').eq('id', company_id).single().execute()
+        comp_name = comp_res.data.get('name') if comp_res.data else "export"
+        
+        # 撈取所有知識條目
+        res = sb.table('knowledge_base').select('*').eq('company_id', company_id).execute()
+        data = res.data or []
+        
+        clean_data = []
+        for d in data:
+            clean_data.append({
+                'title': d.get('title'),
+                'content': d.get('content'),
+                'tags': d.get('tags', [])
+            })
+            
+        json_str = json.dumps(clean_data, ensure_ascii=False, indent=2)
+        
+        return Response(
+            json_str,
+            mimetype="application/json",
+            headers={"Content-disposition": f"attachment; filename=knowledge_base_{comp_name}.json"}
+        )
+    except Exception as e:
+        logger.error(f"Export knowledge failed: {e}")
+        return f"匯出失敗: {str(e)}", 500
+
+
+@app.route('/knowledge/import', methods=['POST'])
+@login_required
+def knowledge_import():
+    try:
+        company_id = request.form.get('company_id')
+        if not company_id:
+            flash("缺少公司 ID", "error")
+            return redirect(url_for('knowledge'))
+            
+        if 'file' not in request.files:
+            flash("請選擇檔案上傳", "error")
+            return redirect(url_for('knowledge', company_id=company_id))
+            
+        file = request.files['file']
+        if not file or file.filename == '':
+            flash("未選擇任何檔案", "error")
+            return redirect(url_for('knowledge', company_id=company_id))
+            
+        filename = file.filename.lower()
+        imported_count = 0
+        
+        # 1. JSON Import
+        if filename.endswith('.json'):
+            try:
+                raw_data = file.read().decode('utf-8', errors='ignore')
+                items = json.loads(raw_data)
+                if not isinstance(items, list):
+                    flash("JSON 檔案格式必須為物件陣列", "error")
+                    return redirect(url_for('knowledge', company_id=company_id))
+                    
+                insert_batch = []
+                for item in items:
+                    title = item.get('title', '').strip()
+                    content = item.get('content', '').strip()
+                    tags = item.get('tags', [])
+                    if not isinstance(tags, list):
+                        tags = [t.strip() for t in str(tags).split(',') if t.strip()]
+                    if title and content:
+                        insert_batch.append({
+                            'company_id': company_id,
+                            'title': title,
+                            'content': content,
+                            'tags': tags,
+                            'is_active': True
+                        })
+                if insert_batch:
+                    sb.table('knowledge_base').insert(insert_batch).execute()
+                    imported_count = len(insert_batch)
+            except Exception as je:
+                flash(f"JSON 解析失敗: {str(je)}", "error")
+                return redirect(url_for('knowledge', company_id=company_id))
+                
+        # 2. CSV Import
+        elif filename.endswith('.csv'):
+            try:
+                import csv
+                import io
+                raw_data = file.read().decode('utf-8', errors='ignore')
+                f_stream = io.StringIO(raw_data)
+                reader = csv.DictReader(f_stream)
+                
+                insert_batch = []
+                for row in reader:
+                    title = (row.get('title') or row.get('標題') or row.get('Question') or '').strip()
+                    content = (row.get('content') or row.get('內容') or row.get('Answer') or '').strip()
+                    tags_str = (row.get('tags') or row.get('標籤') or '').strip()
+                    
+                    tags = [t.strip() for t in tags_str.split(',') if t.strip()] if tags_str else []
+                    if title and content:
+                        insert_batch.append({
+                            'company_id': company_id,
+                            'title': title,
+                            'content': content,
+                            'tags': tags,
+                            'is_active': True
+                        })
+                if insert_batch:
+                    sb.table('knowledge_base').insert(insert_batch).execute()
+                    imported_count = len(insert_batch)
+            except Exception as ce:
+                flash(f"CSV 解析或讀取失敗: {str(ce)}", "error")
+                return redirect(url_for('knowledge', company_id=company_id))
+                
+        else:
+            flash("不支援的檔案格式，請上傳 .json 或 .csv 檔案", "error")
+            return redirect(url_for('knowledge', company_id=company_id))
+            
+        flash(f"成功批次匯入 {imported_count} 筆知識條目！", "success")
+        return redirect(url_for('knowledge', company_id=company_id))
+    except Exception as e:
+        logger.error(f"Import knowledge failed: {e}")
+        flash(f"匯入失敗: {str(e)}", "error")
+        return redirect(url_for('knowledge'))
+
+
 # ── Knowledge Base ─────────────────────────────────────────────────────────────
 
 @app.route('/knowledge')
@@ -619,6 +954,73 @@ def _search_web(query: str, max_results: int = 5) -> list[dict]:
     return results
 
 
+def _fallback_extract(content: str) -> list[dict]:
+    """超強容錯的知識萃取解析器：當 json.loads 失敗時，嘗試用正則與多種模式復原資料"""
+    entries = []
+    
+    # 模式一：解析 JSON-like 區塊（尋找 `{...}` 結構）
+    blocks = re.findall(r'\{([^{}]+)\}', content)
+    for block in blocks:
+        try:
+            # 尋找 title (支援雙引號、單引號、或無引號，寬鬆匹配直到逗號或大括號)
+            title = ""
+            title_match = re.search(r'["\'\s]*title["\'\s]*:\s*["\']?(.*?)["\']?(?:,|\s*\}|\s*"content"\s*:)', block, re.DOTALL | re.IGNORECASE)
+            if title_match:
+                title = title_match.group(1).strip()
+            else:
+                t_m = re.search(r'title["\']?\s*:\s*["\']?([^"\',}]+)', block, re.IGNORECASE)
+                if t_m:
+                    title = t_m.group(1).strip()
+            
+            # 尋找 content
+            cnt = ""
+            content_match = re.search(r'["\'\s]*content["\'\s]*:\s*["\']?(.*?)["\']?(?:,|\s*\})', block, re.DOTALL | re.IGNORECASE)
+            if content_match:
+                cnt = content_match.group(1).strip()
+            else:
+                c_m = re.search(r'content["\']?\s*:\s*["\']?([^"}]+)', block, re.IGNORECASE)
+                if c_m:
+                    cnt = c_m.group(1).strip()
+            
+            # 尋找 tags
+            tags = []
+            tags_match = re.search(r'tags["\']?\s*:\s*\[(.*?)\]', block, re.IGNORECASE)
+            if tags_match:
+                tags = [t.strip().replace('"', '').replace("'", "") for t in tags_match.group(1).split(',') if t.strip()]
+            
+            # 清理引號與轉義字元
+            title = re.sub(r'^["\']|["\']$', '', title).replace('\\"', '"').replace("\\'", "'").strip()
+            cnt = re.sub(r'^["\']|["\']$', '', cnt).replace('\\"', '"').replace("\\'", "'").strip()
+            
+            if title and cnt:
+                entries.append({"title": title[:15], "content": cnt, "tags": tags})
+        except Exception as e:
+            logger.debug(f"Block parse failed: {e}")
+            
+    # 模式二：如果沒有解析到 JSON 物件，嘗試解析 Markdown 清單/項目標題
+    if not entries:
+        items = re.split(r'(?:\d+\.|\*|-|###)\s+', content)
+        for item in items:
+            if not item.strip():
+                continue
+            title_m = re.search(r'(?:標題|Title)\s*[:：]\s*(.*?)(?:\n|$)', item, re.IGNORECASE)
+            content_m = re.search(r'(?:說明|內容|Content|Detail)\s*[:：]\s*(.*?)(?:\n\s*(?:標籤|Tags)|$)', item, re.DOTALL | re.IGNORECASE)
+            tags_m = re.search(r'(?:標籤|Tags)\s*[:：]\s*(.*?)(?:\n|$)', item, re.IGNORECASE)
+            
+            if title_m and content_m:
+                t = title_m.group(1).strip()
+                c = content_m.group(1).strip()
+                t = re.sub(r'^["\']|["\']$', '', t).strip()
+                c = re.sub(r'^["\']|["\']$', '', c).strip()
+                
+                tags = []
+                if tags_m:
+                    tags = [tg.strip().replace('"', '').replace("'", "") for tg in re.split(r'[,，、\s]+', tags_m.group(1)) if tg.strip()]
+                entries.append({"title": t[:15], "content": c, "tags": tags})
+                
+    return entries
+
+
 def _llm_extract(raw_text: str, hint: str = '') -> list[dict]:
     """呼叫配置的 LLM (本地/Gemini/NVIDIA NIM/OpenRouter)，從原始文字萃取知識條目 JSON"""
     prompt = f"""你是知識庫整理助手。請從以下文字中萃取出 2-3 個清晰的知識條目。
@@ -713,25 +1115,14 @@ def _llm_extract(raw_text: str, hint: str = '') -> list[dict]:
         logger.error(f"Raw LLM output:\n{raw_content}")
         logger.error(f"Extracted content to parse:\n{content}")
         
-        # fallback 嘗試：如果包含未逸出的雙引號，我們嘗試用正則表達式來抽取出 title & content & tags
+        # fallback 嘗試：利用 robust fallback 解析器從格式損壞的 JSON 或 Markdown 清單中提取資料
         try:
-            entries = []
-            # 尋找所有像 {"title": "...", "content": "..."} 的區塊
-            blocks = re.findall(r'\{\s*"title"\s*:\s*"(.*?)"\s*,\s*"content"\s*:\s*"(.*?)"', content, re.DOTALL)
-            for title, cnt in blocks:
-                title = title.replace('\\"', '"').replace('"', '').strip()
-                cnt = cnt.replace('\\"', '"').replace('"', '').strip()
-                # 簡單抓取 tags
-                tags_match = re.search(r'"tags"\s*:\s*\[(.*?)\]', content)
-                tags = []
-                if tags_match:
-                    tags = [t.strip().replace('"', '') for t in tags_match.group(1).split(',') if t.strip()]
-                entries.append({"title": title, "content": cnt, "tags": tags})
+            entries = _fallback_extract(content)
             if entries:
-                logger.info(f"Fallback regex-based parser successfully recovered {len(entries)} entries!")
+                logger.info(f"Robust fallback parser successfully recovered {len(entries)} entries!")
                 return entries
         except Exception as e2:
-            logger.error(f"Fallback regex parser also failed: {e2}")
+            logger.error(f"Fallback parser also failed: {e2}")
             
         raise ValueError(f"無法解析 AI 回傳的資料格式：{e}。請縮短文字或提供更簡單的內容後再試。")
 
@@ -780,7 +1171,34 @@ def knowledge_detect_url():
 
             if full_url != url:
                 path_lower = parsed_full.path.lower()
-                if any(p in path_lower for p in ['cp.aspx', 'content_list.aspx', 'news_content.aspx', 'active_content.aspx']) or (parsed_full.query and 'n=' in parsed_full.query):
+                
+                # 1. 排除常見靜態資源檔案
+                static_exts = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.css', '.js', '.zip', '.rar', '.pdf', '.docx', '.xlsx', '.pptx', '.mp3', '.mp4']
+                if any(path_lower.endswith(ext) for ext in static_exts):
+                    continue
+                    
+                # 2. 排除常見管理/導航/無效頁面
+                admin_keywords = ['login', 'logout', 'register', 'signin', 'signup', 'sitemap', 'contact', 'about', 'privacy', 'term', 'help']
+                if any(k in path_lower for k in admin_keywords):
+                    continue
+                    
+                # 3. 判定是否為內容型子網頁 (聯集條件)
+                is_content_link = False
+                
+                # 條件 A: 原有政府機關特定 aspx 格式
+                if any(p in path_lower for p in ['cp.aspx', 'content_list.aspx', 'news_content.aspx', 'active_content.aspx']):
+                    is_content_link = True
+                # 條件 B: 常見的動態內容或申辦關鍵字
+                elif any(p in path_lower for p in ['detail', 'view', 'info', 'faq', 'news', 'apply', 'article', 'post', 'item']):
+                    is_content_link = True
+                # 條件 C: 含有特定的內容查詢參數
+                elif parsed_full.query and any(q in parsed_full.query.lower() for q in ['itemid=', 'id=', 'n=', 'index=', 'cid=', 'pk=', 'post=']):
+                    is_content_link = True
+                # 條件 D: 通用深度路徑且標題文字字數較長 (防範抓取全域導航選單)
+                elif len(text) >= 4 and path_lower.count('/') >= 2:
+                    is_content_link = True
+                    
+                if is_content_link:
                     if full_url not in seen_urls:
                         seen_urls.add(full_url)
                         detected_links.append({
@@ -1245,6 +1663,9 @@ def _is_model_suitable(model_size_b, vram_gb):
 @login_required
 def api_models_search():
     query = request.args.get('q', '').strip()
+    sort_by = request.args.get('sort', 'lastModified').strip()
+    if sort_by not in ['lastModified', 'downloads', 'likes']:
+        sort_by = 'lastModified'
     
     # 1. 取得 GPU 總顯存大小 (VRAM) 以進行動態篩選
     vram_total_gb = 0.0
@@ -1257,7 +1678,7 @@ def api_models_search():
         pass  # 無 GPU 或獲取失敗，視為純 CPU 模式
         
     # 擴大拉取數量至 100 名以供後端過濾，並使用 full=true 取得更新時間與檔案列表
-    url = "https://huggingface.co/api/models?sort=downloads&direction=-1&limit=100&filter=gguf&full=true"
+    url = f"https://huggingface.co/api/models?sort={sort_by}&direction=-1&limit=100&filter=gguf&full=true"
     if query:
         url += f"&search={query}"
         
@@ -1288,8 +1709,7 @@ def api_models_search():
             model_size_b = _get_model_size_billion(model_id)
             
             # 3. 依據本機配備之 VRAM 動態篩選適合運行的模型大小
-            if not _is_model_suitable(model_size_b, vram_total_gb):
-                continue  # 超過本機配備極限的模型直接排除，不呈現於搜尋結果
+            suitable = _is_model_suitable(model_size_b, vram_total_gb)
                 
             # 計算該 Repository 內的 GGUF 檔案數量，若無 GGUF 檔則過濾
             siblings = m.get('siblings', [])
@@ -1301,14 +1721,12 @@ def api_models_search():
                 'id': model_id,
                 'downloads': downloads,
                 'likes': likes,
-                'suitable': True,
+                'suitable': suitable,
                 'updated_at': updated_at,
                 'gguf_count': gguf_count
             })
             
-        # 4. 根據日期由最新排在最前面 (updated_at 降序)
-        processed_models.sort(key=lambda x: x['updated_at'], reverse=True)
-            
+        # 4. 直接保留 Hugging Face API 回傳的排序 (依 sort_by 設定之排序)
         # 最多只回傳前 25 個精選模型以防頁面過長
         return jsonify(processed_models[:25])
     except Exception as e:
@@ -1359,7 +1777,17 @@ def api_models_files():
     except Exception:
         pass
         
-    url = f"https://huggingface.co/api/models/{model_id}/tree/main"
+    # 優先取得當前最新的 commit sha 作為 pointer，完美支援 master/main 或其他 default branch 名稱
+    branch_or_sha = "main"
+    try:
+        detail_url = f"https://huggingface.co/api/models/{model_id}"
+        detail_resp = req_lib.get(detail_url, timeout=5)
+        if detail_resp.status_code == 200:
+            branch_or_sha = detail_resp.json().get('sha', 'main')
+    except Exception:
+        pass
+        
+    url = f"https://huggingface.co/api/models/{model_id}/tree/{branch_or_sha}"
     try:
         resp = req_lib.get(url, timeout=10)
         resp.raise_for_status()
@@ -1510,10 +1938,184 @@ def wait_for_llama_vram_clear(timeout=8):
     return False
 
 
+# ── Model Switch Status & Worker ──────────────────────────────────────────────
+SWITCH_STATUS = {
+    'status': 'idle',   # 'idle' | 'switching' | 'success' | 'failed'
+    'model_name': '',
+    'error': None,
+    'message': '',
+    'last_updated': 0
+}
+
+def _switch_model_worker(selected_path, model_name, old_selected_path, old_cfg, threads, gpu_layers, ctx_size, selected_model_file, service_path, config_path):
+    global SWITCH_STATUS
+    SWITCH_STATUS['status'] = 'switching'
+    SWITCH_STATUS['model_name'] = model_name
+    SWITCH_STATUS['error'] = None
+    SWITCH_STATUS['message'] = f'正在套用參數並重啟服務，準備載入模型 {model_name}...'
+    SWITCH_STATUS['last_updated'] = time.time()
+    
+    def write_service_file(m_path, t, g, c):
+        extra_args = []
+        m_path_lower = m_path.lower()
+        if any(kw in m_path_lower for kw in ["moe", "a3b", "mixtral", "dbrx", "a1b", "lfm"]):
+            extra_args.append("--cpu-moe")
+        extra_args.append("--no-mmap")
+        extra_args.append("--mlock")
+        extra_args.append("--flash-attn auto")
+        extra_str = " ".join(extra_args)
+        
+        content = f"""[Unit]
+Description=LINE Bot LLaMA Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pipadmin/文件
+ExecStart=/home/pipadmin/文件/llama.cpp/build/bin/llama-server \\
+    --model {m_path} \\
+    --host 127.0.0.1 \\
+    --port 8080 \\
+    --ctx-size {c} \\
+    --n-gpu-layers {g} \\
+    --threads {t} \\
+    --threads-batch {t} \\
+    --parallel 1 \\
+    {extra_str} \\
+    --log-disable
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/pipadmin/文件/llama.log
+StandardError=append:/home/pipadmin/文件/llama.log
+Environment=HOME=/home/pipadmin
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=default.target
+"""
+        with open(service_path, "w") as sf:
+            sf.write(content)
+
+    try:
+        try:
+            with open(config_path, 'w') as cf:
+                json.dump({'threads': threads, 'gpu_layers': gpu_layers, 'ctx_size': ctx_size}, cf)
+        except Exception as e:
+            logger.error(f"Failed to auto-save model config: {e}")
+
+        with open(selected_model_file, "w") as f:
+            f.write(selected_path)
+
+        write_service_file(selected_path, threads, gpu_layers, ctx_size)
+            
+        # 3. Reload and restart service
+        SWITCH_STATUS['message'] = '正在重新載入 Systemd 並重啟 linebot-llama 服務...'
+        SWITCH_STATUS['last_updated'] = time.time()
+        subprocess.run("systemctl --user daemon-reload", shell=True, check=True)
+        subprocess.run("systemctl --user stop linebot-llama", shell=True)
+        subprocess.run("pkill -9 -f 'llama-server'", shell=True)
+        wait_for_llama_vram_clear()
+        subprocess.run("systemctl --user start linebot-llama", shell=True, check=True)
+        
+        # 4. Check status
+        SWITCH_STATUS['message'] = '服務已啟動，正在載入模型檔案至記憶體/顯存 (最長等待 40 秒)...'
+        SWITCH_STATUS['last_updated'] = time.time()
+        is_active = False
+        import requests
+        for i in range(40):
+            status_check = subprocess.run("systemctl --user is-active linebot-llama", shell=True, capture_output=True, text=True)
+            if status_check.stdout.strip() != "active":
+                break
+            try:
+                h_resp = requests.get("http://127.0.0.1:8080/health", timeout=1.0)
+                if h_resp.status_code == 200:
+                    h_data = h_resp.json()
+                    if h_data.get('status') == 'ok':
+                        is_active = True
+                        break
+            except Exception:
+                pass
+            time.sleep(1.0)
+        
+        if not is_active:
+            err_msg = "模型啟動失敗，引擎進程已退出。"
+            log_path = "/home/pipadmin/文件/llama.log"
+            if os.path.exists(log_path):
+                try:
+                    with open(log_path, "r", encoding="utf-8", errors="ignore") as lf:
+                        log_lines = lf.readlines()[-150:]
+                    log_text = "".join(log_lines)
+                    if "data is not within the file bounds" in log_text or "corrupted or incomplete" in log_text:
+                        err_msg = "模型載入失敗：該模型檔案已損壞，可能是下載中斷或不完整，建議刪除重新下載！"
+                    elif "cudaError" in log_text or "CUDA error" in log_text or "out of memory" in log_text or "CUDA_ERROR_OUT_OF_MEMORY" in log_text:
+                        err_msg = "顯卡記憶體 (VRAM) 不足！GTX 1060 (6GB) 無法承載此微調參數，請調低 GPU 卸載層數 (建議設為 0) 或縮小上下文大小。"
+                    elif "failed to load model" in log_text:
+                        err_msg = "引擎載入模型失敗，請確認檔案格式是否正確且完整。"
+                except Exception as le:
+                    logger.error(f"Read llama.log error: {le}")
+            
+            # Rollback
+            SWITCH_STATUS['message'] = f'錯誤：{err_msg} 正在執行自動回滾...'
+            SWITCH_STATUS['last_updated'] = time.time()
+            if old_selected_path and os.path.exists(old_selected_path) and old_selected_path != selected_path:
+                with open(selected_model_file, "w") as f:
+                    f.write(old_selected_path)
+                write_service_file(old_selected_path, old_cfg.get('threads', 8), old_cfg.get('gpu_layers', 10), old_cfg.get('ctx_size', 8192))
+                subprocess.run("systemctl --user daemon-reload", shell=True)
+                subprocess.run("systemctl --user stop linebot-llama", shell=True)
+                subprocess.run("pkill -9 -f 'llama-server'", shell=True)
+                wait_for_llama_vram_clear()
+                subprocess.run("systemctl --user start linebot-llama", shell=True)
+                SWITCH_STATUS.update({
+                    'status': 'failed',
+                    'error': err_msg,
+                    'message': f'切換失敗：{err_msg} 已自動回滾至先前工作的模型。',
+                    'last_updated': time.time()
+                })
+            else:
+                safe_threads = 8
+                safe_gpu = 0
+                safe_ctx = 2048
+                write_service_file(selected_path, safe_threads, safe_gpu, safe_ctx)
+                subprocess.run("systemctl --user daemon-reload", shell=True)
+                subprocess.run("systemctl --user stop linebot-llama", shell=True)
+                subprocess.run("pkill -9 -f 'llama-server'", shell=True)
+                wait_for_llama_vram_clear()
+                subprocess.run("systemctl --user start linebot-llama", shell=True)
+                try:
+                    with open(config_path, 'w') as cf:
+                        json.dump({'threads': safe_threads, 'gpu_layers': safe_gpu, 'ctx_size': safe_ctx}, cf)
+                except Exception:
+                    pass
+                SWITCH_STATUS.update({
+                    'status': 'failed',
+                    'error': err_msg,
+                    'message': f'切換失敗：{err_msg} 已自動調整為 CPU 預設安全配置（GPU層數=0, Context=2048）重新啟動。',
+                    'last_updated': time.time()
+                })
+        else:
+            SWITCH_STATUS.update({
+                'status': 'success',
+                'message': f'已成功切換至模型 {model_name}。',
+                'last_updated': time.time()
+            })
+    except Exception as e:
+        logger.error(f"Error in background switch worker: {e}")
+        SWITCH_STATUS.update({
+            'status': 'failed',
+            'error': str(e),
+            'message': f'切換失敗，發生未預期錯誤：{str(e)}',
+            'last_updated': time.time()
+        })
+
 @app.route('/api/models/switch', methods=['POST'])
 @login_required
 def api_models_switch():
+    global SWITCH_STATUS
     try:
+        if SWITCH_STATUS['status'] == 'switching':
+            return jsonify({'error': f'目前已有模型 ({SWITCH_STATUS["model_name"]}) 正在切換中，請稍候。'}), 400
+
         data = request.get_json() or {}
         model_name = data.get('model_name', '').strip()
         if not model_name or not model_name.endswith('.gguf'):
@@ -1557,172 +2159,47 @@ def api_models_switch():
             
         # 預設分級
         model_class = "large"
-        
-        # 1. 判斷是否為極小模型 (<=4B，如 Gemma-4 E4B 等，檔案大小或名稱匹配)
-        if any(kw in m_name_lower for kw in ["gemma-4", "4b", "3b", "2b", "gemma2-2b"]):
+        if any(kw in m_name_lower for kw in ["gemma-4", "4b", "3b", "2b", "gemma2-2b", "lfm", "a1b"]):
             model_class = "tiny"
-        # 2. 判斷是否為中等模型 (7B - 9B 模型，像是 Llama 3 8B, Qwen3 8B, 或是檔名含 7b/8b/9b)
         elif any(kw in m_name_lower for kw in ["8b", "7b", "9b", "gemma2-9b"]):
             model_class = "medium"
-        # 3. 檔案大小 fallback 判斷 (檔案小於 6.5 GB 但剛好沒匹配到關鍵字)
         elif file_size_gb > 0 and file_size_gb < 6.5:
-            # 如果是小檔案但非 tiny 檔名，歸類為 medium 以策安全
             model_class = "medium"
 
         if model_class == "tiny":
             threads = 8
             gpu_layers = 99
-            ctx_size = 8192
-            logger.info(f"Auto-configured tiny model config for {model_name}: threads=8, gpu_layers=99, ctx_size=8192")
+            ctx_size = 4096
         elif model_class == "medium":
             threads = 8
             gpu_layers = 18
             ctx_size = 4096
-            logger.info(f"Auto-configured medium model (7B-9B) config for {model_name}: threads=8, gpu_layers=18, ctx_size=4096")
         else:
             threads = 8
             gpu_layers = 10
             ctx_size = 4096
-            logger.info(f"Auto-configured large/MoE model config for {model_name}: threads=8, gpu_layers=10, ctx_size=4096")
 
-        # 儲存最佳化參數回 engine_config.json
-        try:
-            with open(config_path, 'w') as cf:
-                json.dump({'threads': threads, 'gpu_layers': gpu_layers, 'ctx_size': ctx_size}, cf)
-        except Exception as e:
-            logger.error(f"Failed to auto-save model config: {e}")
-
-        # 1. 寫入 ~/.config/linebot/selected_model 紀錄檔
-        with open(selected_model_file, "w") as f:
-            f.write(selected_path)
-            
-        # 2. 更新 systemd 服務配置 (寫入最新 ExecStart)
         user_systemd = os.path.expanduser("~/.config/systemd/user")
         os.makedirs(user_systemd, exist_ok=True)
         service_path = os.path.join(user_systemd, "linebot-llama.service")
         
-        def write_service_file(m_path, t, g, c):
-            extra_args = []
-            m_path_lower = m_path.lower()
-            # MoE models benefit from --cpu-moe to keep expert routing on CPU
-            if "moe" in m_path_lower or "a3b" in m_path_lower or "mixtral" in m_path_lower or "dbrx" in m_path_lower:
-                extra_args.append("--cpu-moe")
-            extra_args.append("--no-mmap")
-            extra_args.append("--mlock")  # Lock model weights in RAM to prevent swap
-            extra_args.append("--flash-attn auto")  # Let llama.cpp auto-detect FA support (requires Volta+)
-            extra_str = " ".join(extra_args)
-            
-            content = f"""[Unit]
-Description=LINE Bot LLaMA Server
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/home/pipadmin/文件
-ExecStart=/home/pipadmin/文件/llama.cpp/build/bin/llama-server \\
-    --model {m_path} \\
-    --host 127.0.0.1 \\
-    --port 8080 \\
-    --ctx-size {c} \\
-    --n-gpu-layers {g} \\
-    --threads {t} \\
-    --threads-batch {t} \\
-    --parallel 1 \\
-    {extra_str} \\
-    --log-disable
-Restart=always
-RestartSec=10
-StandardOutput=append:/home/pipadmin/文件/llama.log
-StandardError=append:/home/pipadmin/文件/llama.log
-Environment=HOME=/home/pipadmin
-LimitMEMLOCK=infinity
-
-[Install]
-WantedBy=default.target
-"""
-            with open(service_path, "w") as sf:
-                sf.write(content)
-
-        write_service_file(selected_path, threads, gpu_layers, ctx_size)
-            
-        # 3. 重新載入 Systemd 並重啟服務
-        subprocess.run("systemctl --user daemon-reload", shell=True, check=True)
-        subprocess.run("systemctl --user stop linebot-llama", shell=True)
-        subprocess.run("pkill -9 -f 'llama-server'", shell=True)
-        wait_for_llama_vram_clear()
-        subprocess.run("systemctl --user start linebot-llama", shell=True, check=True)
+        # Start switch thread
+        t = threading.Thread(
+            target=_switch_model_worker,
+            args=(selected_path, model_name, old_selected_path, old_cfg, threads, gpu_layers, ctx_size, selected_model_file, service_path, config_path)
+        )
+        t.start()
         
-        # 4. 偵測引擎是否成功載入模型並進入工作狀態 (輪詢 /health 端點，最長等待 40 秒)
-        is_active = False
-        import requests
-        for i in range(40):
-            # 檢查 systemd 服務是否仍在運行中，若已崩潰則直接退出
-            status_check = subprocess.run("systemctl --user is-active linebot-llama", shell=True, capture_output=True, text=True)
-            if status_check.stdout.strip() != "active":
-                break
-            try:
-                h_resp = requests.get("http://127.0.0.1:8080/health", timeout=1.0)
-                if h_resp.status_code == 200:
-                    h_data = h_resp.json()
-                    if h_data.get('status') == 'ok':
-                        is_active = True
-                        break
-            except Exception:
-                pass
-            time.sleep(1.0)
-        
-        if not is_active:
-            err_msg = "模型啟動失敗，引擎進程已退出。"
-            log_path = "/home/pipadmin/文件/llama.log"
-            if os.path.exists(log_path):
-                try:
-                    with open(log_path, "r", encoding="utf-8", errors="ignore") as lf:
-                        log_lines = lf.readlines()[-150:]
-                    log_text = "".join(log_lines)
-                    if "data is not within the file bounds" in log_text or "corrupted or incomplete" in log_text:
-                        err_msg = "模型載入失敗：該模型檔案已損壞，可能是下載中斷或不完整，建議刪除重新下載！"
-                    elif "cudaError" in log_text or "CUDA error" in log_text or "out of memory" in log_text or "CUDA_ERROR_OUT_OF_MEMORY" in log_text:
-                        err_msg = "顯卡記憶體 (VRAM) 不足！GTX 1060 (6GB) 無法承載此微調參數，請調低 GPU 卸載層數 (建議設為 0) 或縮小上下文大小。"
-                    elif "failed to load model" in log_text:
-                        err_msg = "引擎載入模型失敗，請確認檔案格式是否正確且完整。"
-                except Exception as le:
-                    logger.error(f"Read llama.log error: {le}")
-            
-            # 執行回滾
-            if old_selected_path and os.path.exists(old_selected_path) and old_selected_path != selected_path:
-                with open(selected_model_file, "w") as f:
-                    f.write(old_selected_path)
-                write_service_file(old_selected_path, old_cfg.get('threads', 8), old_cfg.get('gpu_layers', 10), old_cfg.get('ctx_size', 8192))
-                subprocess.run("systemctl --user daemon-reload", shell=True)
-                subprocess.run("systemctl --user stop linebot-llama", shell=True)
-                subprocess.run("pkill -9 -f 'llama-server'", shell=True)
-                wait_for_llama_vram_clear()
-                subprocess.run("systemctl --user start linebot-llama", shell=True)
-                return jsonify({'error': f'{err_msg} 已自動回滾至先前工作的模型。'}), 400
-            else:
-                # 若無舊模型可回滾，嘗試以 CPU-only 預設安全參數重啟目前模型
-                safe_threads = 8
-                safe_gpu = 0
-                safe_ctx = 2048
-                write_service_file(selected_path, safe_threads, safe_gpu, safe_ctx)
-                subprocess.run("systemctl --user daemon-reload", shell=True)
-                subprocess.run("systemctl --user stop linebot-llama", shell=True)
-                subprocess.run("pkill -9 -f 'llama-server'", shell=True)
-                wait_for_llama_vram_clear()
-                subprocess.run("systemctl --user start linebot-llama", shell=True)
-                
-                # 更新設定檔為安全參數
-                try:
-                    with open(config_path, 'w') as cf:
-                        json.dump({'threads': safe_threads, 'gpu_layers': safe_gpu, 'ctx_size': safe_ctx}, cf)
-                except Exception:
-                    pass
-                return jsonify({'error': f'{err_msg} 已自動調整為 CPU 預設安全配置（GPU層數=0, Context=2048）重新啟動。'}), 400
-                
-        return jsonify({'ok': True, 'msg': f'已成功切換至模型 {model_name}。'})
+        return jsonify({'ok': True, 'msg': '已開始在背景切換模型，請稍候。', 'status': 'switching'})
     except Exception as e:
-        logger.error(f"Switch model failed: {e}")
-        return jsonify({'error': f'切換模型失敗: {str(e)}'}), 500
+        logger.error(f"Switch model failed to trigger: {e}")
+        return jsonify({'error': f'觸發切換失敗: {str(e)}'}), 500
+
+@app.route('/api/models/switch/status')
+@login_required
+def api_models_switch_status():
+    global SWITCH_STATUS
+    return jsonify(SWITCH_STATUS)
 
 
 @app.route('/api/models/config', methods=['GET', 'POST'])
@@ -1797,7 +2274,7 @@ def api_models_config():
                         extra_args = []
                         m_path_lower = m_path.lower()
                         # MoE models benefit from --cpu-moe to keep expert routing on CPU
-                        if "moe" in m_path_lower or "a3b" in m_path_lower or "mixtral" in m_path_lower or "dbrx" in m_path_lower:
+                        if any(kw in m_path_lower for kw in ["moe", "a3b", "mixtral", "dbrx", "a1b", "lfm"]):
                             extra_args.append("--cpu-moe")
                         extra_args.append("--no-mmap")
                         extra_args.append("--mlock")  # Lock model weights in RAM to prevent swap
@@ -1922,65 +2399,16 @@ def delete_model():
 @login_required
 def api_system_gpu():
     try:
-        # 1. 取得 GPU 名稱與 VRAM 用量 (nvidia-smi)
-        gpu_name = "NVIDIA GPU"
-        used, total = 0, 0
-        try:
-            cmd_name = "nvidia-smi --query-gpu=name --format=csv,noheader"
-            gpu_name = subprocess.check_output(cmd_name, shell=True, text=True).strip()
-            
-            cmd_vram = "nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits"
-            out_vram = subprocess.check_output(cmd_vram, shell=True, text=True).strip()
-            if out_vram:
-                parts = [p.strip() for p in out_vram.split(',')]
-                if len(parts) >= 2:
-                    used = int(parts[0])
-                    total = int(parts[1])
-        except Exception:
-            gpu_name = "NVIDIA GeForce GTX 1060 (模擬)"
-            
-        # 2. 取得 CPU 使用率 (/proc/stat)
-        cpu_percent = 0.0
-        try:
-            with open('/proc/stat', 'r') as f:
-                fields1 = [float(x) for x in f.readline().strip().split()[1:]]
-            time.sleep(0.05) # 50ms 延遲以計算 CPU 差值，不阻塞 Web 主線程
-            with open('/proc/stat', 'r') as f:
-                fields2 = [float(x) for x in f.readline().strip().split()[1:]]
-            idle1, total1 = fields1[3], sum(fields1)
-            idle2, total2 = fields2[3], sum(fields2)
-            idle_delta = idle2 - idle1
-            total_delta = total2 - total1
-            cpu_percent = round((1 - idle_delta / total_delta) * 100, 1) if total_delta > 0 else 0.0
-        except Exception:
-            pass
-            
-        # 3. 取得系統記憶體 (RAM) 使用量 (free -m)
-        ram_used_gb = 0.0
-        ram_total_gb = 0.0
-        ram_percent = 0.0
-        try:
-            out_ram = subprocess.check_output("free -m", shell=True, text=True)
-            lines = out_ram.strip().split('\n')
-            parts = lines[1].split()
-            total_ram_mb = int(parts[1])
-            available_ram_mb = int(parts[6]) if len(parts) >= 7 else int(parts[3])
-            used_ram_mb = total_ram_mb - available_ram_mb
-            ram_percent = round((used_ram_mb / total_ram_mb) * 100, 1) if total_ram_mb > 0 else 0.0
-            ram_used_gb = round(used_ram_mb / 1024, 1)
-            ram_total_gb = round(total_ram_mb / 1024, 1)
-        except Exception:
-            pass
-                
+        global SYSTEM_METRICS_CACHE
         return jsonify({
-            'name': gpu_name,
-            'vram_used': used,
-            'vram_total': total,
-            'vram_percent': round((used / total) * 100, 1) if total > 0 else 0,
-            'cpu_percent': cpu_percent,
-            'ram_used': ram_used_gb,
-            'ram_total': ram_total_gb,
-            'ram_percent': ram_percent
+            'name': SYSTEM_METRICS_CACHE.get('gpu_name', 'NVIDIA GPU'),
+            'vram_used': SYSTEM_METRICS_CACHE.get('vram_used', 0),
+            'vram_total': SYSTEM_METRICS_CACHE.get('vram_total', 0),
+            'vram_percent': SYSTEM_METRICS_CACHE.get('vram_percent', 0.0),
+            'cpu_percent': SYSTEM_METRICS_CACHE.get('cpu_percent', 0.0),
+            'ram_used': SYSTEM_METRICS_CACHE.get('ram_used_gb', 0.0),
+            'ram_total': SYSTEM_METRICS_CACHE.get('ram_total_gb', 0.0),
+            'ram_percent': SYSTEM_METRICS_CACHE.get('ram_percent', 0.0)
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -2120,7 +2548,139 @@ def api_generate_video():
         return jsonify({'error': str(e)}), 500
 
 
+def _read_env_vars(env_path):
+    vars_dict = {}
+    if os.path.exists(env_path):
+        with open(env_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line_str = line.strip()
+                if line_str and not line_str.startswith('#') and '=' in line_str:
+                    parts = line_str.split('=', 1)
+                    key = parts[0].strip()
+                    val = parts[1].strip().strip('"').strip("'")
+                    vars_dict[key] = val
+    return vars_dict
+
+
+def _mask_api_key(key):
+    if not key:
+        return ""
+    if len(key) > 8:
+        return key[:4] + "*" * (len(key) - 8) + key[-4:]
+    return "****"
+
+
+@app.route('/api/system/knowledge-config', methods=['GET'])
+@login_required
+def get_knowledge_config():
+    try:
+        env_path = os.path.join(os.path.dirname(__file__), '../line_bot/.env')
+        vars_dict = _read_env_vars(env_path)
+        
+        provider = vars_dict.get('KNOWLEDGE_LLM_PROVIDER', 'local')
+        gemini_key = vars_dict.get('GEMINI_API_KEY', '')
+        gemini_model = vars_dict.get('GEMINI_MODEL', 'gemini-2.5-flash')
+        
+        nvidia_key = vars_dict.get('NVIDIA_NIM_API_KEY', '')
+        nvidia_model = vars_dict.get('NVIDIA_NIM_MODEL', 'meta/llama-3.1-405b-instruct')
+        
+        openrouter_key = vars_dict.get('OPENROUTER_API_KEY', '')
+        openrouter_model = vars_dict.get('OPENROUTER_MODEL', 'google/gemini-2.5-flash')
+        
+        return jsonify({
+            "provider": provider,
+            "gemini_key": _mask_api_key(gemini_key),
+            "gemini_model": gemini_model,
+            "nvidia_key": _mask_api_key(nvidia_key),
+            "nvidia_model": nvidia_model,
+            "openrouter_key": _mask_api_key(openrouter_key),
+            "openrouter_model": openrouter_model
+        })
+    except Exception as e:
+        logger.error(f"Get knowledge config failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/system/knowledge-config', methods=['POST'])
+@login_required
+def save_knowledge_config():
+    try:
+        data = request.get_json() or {}
+        provider = data.get('provider', 'local').strip().lower()
+        
+        gemini_key = data.get('gemini_key', '').strip()
+        gemini_model = data.get('gemini_model', '').strip()
+        
+        nvidia_key = data.get('nvidia_key', '').strip()
+        nvidia_model = data.get('nvidia_model', '').strip()
+        
+        openrouter_key = data.get('openrouter_key', '').strip()
+        openrouter_model = data.get('openrouter_model', '').strip()
+        
+        env_path = os.path.join(os.path.dirname(__file__), '../line_bot/.env')
+        current_vars = _read_env_vars(env_path)
+        
+        # 遮罩防禦性檢查與還原
+        if '*' in gemini_key:
+            gemini_key = current_vars.get('GEMINI_API_KEY', '')
+        if '*' in nvidia_key:
+            nvidia_key = current_vars.get('NVIDIA_NIM_API_KEY', '')
+        if '*' in openrouter_key:
+            openrouter_key = current_vars.get('OPENROUTER_API_KEY', '')
+            
+        update_dict = {
+            'KNOWLEDGE_LLM_PROVIDER': provider,
+            'GEMINI_API_KEY': gemini_key,
+            'GEMINI_MODEL': gemini_model,
+            'NVIDIA_NIM_API_KEY': nvidia_key,
+            'NVIDIA_NIM_MODEL': nvidia_model,
+            'OPENROUTER_API_KEY': openrouter_key,
+            'OPENROUTER_MODEL': openrouter_model
+        }
+        
+        lines = []
+        if os.path.exists(env_path):
+            with open(env_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                
+        replaced = {k: False for k in update_dict.keys()}
+        new_lines = []
+        
+        for line in lines:
+            stripped = line.strip()
+            matched_key = None
+            for key in update_dict.keys():
+                if stripped.startswith(f'{key}='):
+                    matched_key = key
+                    break
+            if matched_key:
+                new_lines.append(f'{matched_key}="{update_dict[matched_key]}"\n')
+                replaced[matched_key] = True
+            else:
+                new_lines.append(line)
+                
+        # 追加新變數
+        for key, val in update_dict.items():
+            if not replaced[key]:
+                new_lines.append(f'{key}="{val}"\n')
+                
+        with open(env_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_lines)
+            
+        # 同步更新執行環境變數
+        for key, val in update_dict.items():
+            os.environ[key] = val
+            
+        # 重啟 LINE Bot 服務
+        subprocess.run("systemctl --user restart linebot-flask", shell=True, check=True)
+        
+        return jsonify({"msg": "知識庫模型配置已更新，且 LINE Bot 服務已成功重啟生效！"})
+    except Exception as e:
+        logger.error(f"Save knowledge config failed: {e}")
+        return jsonify({"error": f"儲存失敗: {str(e)}"}), 500
+
+
 if __name__ == '__main__':
     logger.info("管理後台啟動：http://localhost:8888")
-    app.run(host='127.0.0.1', port=8888, debug=False)
+    app.run(host='0.0.0.0', port=8888, debug=False)
 

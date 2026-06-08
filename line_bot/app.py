@@ -14,6 +14,7 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     ReplyMessageRequest,
+    PushMessageRequest,
     TextMessage,
     FlexMessage,
     FlexContainer,
@@ -219,47 +220,87 @@ def _strip_markdown(text: str) -> str:
     return text.strip()
 
 
-def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_reply: str, logo_url: str = None):
-    """回覆 LINE 訊息，優先使用精美設計的 Flex Message，支援 [FLEX_CARD] 解析與自訂 Logo"""
+def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_reply: str, logo_url: str = None, user_id: str = None, force_push: bool = False):
+    """回覆 LINE 訊息，優先使用精美設計的 Flex Message，支援 [FLEX_CARD] 解析與自訂 Logo，且支援超時自動降級為 Push Message"""
     if not ai_reply or not ai_reply.strip():
         ai_reply = "抱歉，我目前無法回答這個問題。"
         
+    def escape_newlines_in_quotes(json_str: str) -> str:
+        in_quotes = False
+        escaped_quotes = False
+        result = []
+        for char in json_str:
+            if char == '"' and not escaped_quotes:
+                in_quotes = not in_quotes
+                result.append(char)
+            elif char == '\\' and in_quotes:
+                escaped_quotes = not escaped_quotes
+                result.append(char)
+            else:
+                if char == '\n' and in_quotes:
+                    result.append('\\n')
+                else:
+                    result.append(char)
+                escaped_quotes = False
+        return "".join(result)
+
+    def _clean_and_parse_json(raw_str: str):
+        import ast
+        s = raw_str.strip()
+        if "```" in s:
+            s = re.sub(r'^```[a-zA-Z0-9]*\s*', '', s)
+            s = re.sub(r'\s*```$', '', s)
+        s = s.strip()
+        start = s.find('{')
+        end = s.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            s = s[start:end+1]
+        try:
+            return json.loads(s)
+        except Exception:
+            pass
+        try:
+            val = ast.literal_eval(s)
+            if isinstance(val, (dict, list)):
+                return val
+        except Exception:
+            pass
+        try:
+            fixed_s = escape_newlines_in_quotes(s)
+            return json.loads(fixed_s)
+        except Exception:
+            pass
+        raise ValueError("JSON parsing failed after all fallback attempts.")
+
     try:
         messages = []
         has_card = False
         card_data = None
         main_text = ""
         
-        start_tag = "[FLEX_CARD]"
-        end_tag = "[/FLEX_CARD]"
-        
-        start_idx = ai_reply.find(start_tag)
-        end_idx = ai_reply.find(end_tag)
-        
-        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-            card_json_str = ai_reply[start_idx + len(start_tag) : end_idx].strip()
-            
-            # 清理模型可能輸出的 markdown code block 包裝
-            if card_json_str.startswith("```"):
-                nl_idx = card_json_str.find("\n")
-                if nl_idx != -1:
-                    card_json_str = card_json_str[nl_idx:].strip()
-                if card_json_str.endswith("```"):
-                    card_json_str = card_json_str[:-3].strip()
-                    
+        # 使用不區分大小寫且容許空格的正則來尋找開始與結束標籤
+        start_match = re.search(r'\[FLEX[-_\s]?CARD\]', ai_reply, re.IGNORECASE)
+        if start_match:
+            end_match = re.search(r'\[/FLEX[-_\s]?CARD\]', ai_reply, re.IGNORECASE)
+            if end_match and end_match.start() > start_match.end():
+                card_json_str = ai_reply[start_match.end():end_match.start()].strip()
+                main_text = (ai_reply[:start_match.start()] + "\n" + ai_reply[end_match.end():]).strip()
+            else:
+                card_json_str = ai_reply[start_match.end():].strip()
+                main_text = ai_reply[:start_match.start()].strip()
+                
             try:
-                card_data = json.loads(card_json_str)
+                card_data = _clean_and_parse_json(card_json_str)
                 has_card = True
-                main_text = (ai_reply[:start_idx] + "\n" + ai_reply[end_idx + len(end_tag):]).strip()
                 main_text = _strip_markdown(main_text)
             except Exception as pe:
-                logger.error({"msg": "Failed to parse FLEX_CARD JSON", "error": str(pe), "json": card_json_str})
+                logger.error({"msg": "Failed to parse FLEX_CARD JSON after deep cleanup", "error": str(pe), "json": card_json_str})
                 has_card = False
                 
         if not has_card:
             # 解析失敗或沒有標籤，抹除所有的 [FLEX_CARD] 以防民眾看見
-            main_text = re.sub(r'\[FLEX_CARD\][\s\S]*?\[/FLEX_CARD\]', '', ai_reply).strip()
-            main_text = re.sub(r'\[FLEX_CARD\][\s\S]*', '', main_text).strip()
+            main_text = re.sub(r'\[FLEX[-_\s]?CARD\][\s\S]*?\[/FLEX[-_\s]?CARD\]', '', ai_reply, flags=re.IGNORECASE).strip()
+            main_text = re.sub(r'\[FLEX[-_\s]?CARD\][\s\S]*', '', main_text, flags=re.IGNORECASE).strip()
             main_text = _strip_markdown(main_text)
         
         # 1. 處理普通對話文字
@@ -498,55 +539,138 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
                 alt_text = f"AI 回覆：{ai_reply[:30]}..."
                 messages.append(FlexMessage(alt_text=alt_text, contents=flex_container))
         
-        # 4. 發送所有回覆
+        # 4. 發送所有回覆 (支援超時/無效 reply_token 自動降級為 Push Message)
         if messages:
-            MessagingApi(api_client).reply_message_with_http_info(
-                ReplyMessageRequest(
-                    reply_token=reply_token,
-                    messages=messages[:5]
-                )
-            )
-            logger.info("Advanced LINE reply sent successfully!")
-            
+            use_push = force_push or not reply_token
+            if use_push:
+                if user_id:
+                    logger.info("Using LINE Push Message API instead of reply token.")
+                    MessagingApi(api_client).push_message_with_http_info(
+                        PushMessageRequest(
+                            to=user_id,
+                            messages=messages[:5]
+                        )
+                    )
+                    logger.info("Advanced LINE Push Message sent successfully!")
+                else:
+                    logger.error("Push Message requested but user_id is missing.")
+            else:
+                try:
+                    MessagingApi(api_client).reply_message_with_http_info(
+                        ReplyMessageRequest(
+                            reply_token=reply_token,
+                            messages=messages[:5]
+                        )
+                    )
+                    logger.info("Advanced LINE reply sent successfully!")
+                except Exception as ex:
+                    err_str = str(ex)
+                    if "reply token" in err_str.lower() or "400" in err_str:
+                        if user_id:
+                            logger.info("Reply token failed. Falling back to Push Message.")
+                            MessagingApi(api_client).push_message_with_http_info(
+                                PushMessageRequest(
+                                    to=user_id,
+                                    messages=messages[:5]
+                                )
+                            )
+                            logger.info("Fallback Advanced LINE Push Message sent successfully!")
+                        else:
+                            raise ex
+                    else:
+                        raise ex
+                        
     except Exception as ex:
         logger.error({"msg": "Failed to send advanced Flex Message, falling back to TextMessage", "error": str(ex)})
         try:
-            MessagingApi(api_client).reply_message_with_http_info(
-                ReplyMessageRequest(
-                    reply_token=reply_token,
-                    messages=[TextMessage(text=ai_reply)]
-                )
-            )
-        except Exception as e2:
-            logger.error({"msg": "Final fallback reply failed", "error": str(e2)})
+            use_push = force_push or not reply_token
+            if use_push:
+                if user_id:
+                    MessagingApi(api_client).push_message_with_http_info(
+                        PushMessageRequest(
+                            to=user_id,
+                            messages=[TextMessage(text=ai_reply)]
+                        )
+                    )
+                else:
+                    logger.error("Push fallback requested but user_id is missing.")
+            else:
+                try:
+                    MessagingApi(api_client).reply_message_with_http_info(
+                        ReplyMessageRequest(
+                            reply_token=reply_token,
+                            messages=[TextMessage(text=ai_reply)]
+                        )
+                    )
+                except Exception as e2:
+                    err_str = str(e2)
+                    if ("reply token" in err_str.lower() or "400" in err_str) and user_id:
+                        logger.info("Fallback reply token failed. Falling back to Push Message.")
+                        MessagingApi(api_client).push_message_with_http_info(
+                            PushMessageRequest(
+                                to=user_id,
+                                messages=[TextMessage(text=ai_reply)]
+                            )
+                        )
+                    else:
+                        raise e2
+        except Exception as final_ex:
+            logger.error({"msg": "Final fallback reply/push failed", "error": str(final_ex)})
 
 # 用戶最後生成的圖片 URL 記錄，便於一鍵轉影片
 user_last_image = {}
 
-def reply_text(company: dict, reply_token: str, text: str):
-    """簡便的純文字回覆輔助函數"""
+def reply_text(company: dict, reply_token: str, text: str, user_id: str = None, force_push: bool = False):
+    """簡便的純文字回覆輔助函數，支援超時降級 Push"""
     try:
         config = Configuration(access_token=company['line_access_token'])
         with ApiClient(config) as api_client:
-            MessagingApi(api_client).reply_message_with_http_info(
-                ReplyMessageRequest(
-                    reply_token=reply_token,
-                    messages=[TextMessage(text=text)]
+            use_push = force_push or not reply_token
+            if use_push and user_id:
+                MessagingApi(api_client).push_message_with_http_info(
+                    PushMessageRequest(
+                        to=user_id,
+                        messages=[TextMessage(text=text)]
+                    )
                 )
-            )
+                logger.info("Pure text LINE Push Message sent successfully!")
+            else:
+                try:
+                    MessagingApi(api_client).reply_message_with_http_info(
+                        ReplyMessageRequest(
+                            reply_token=reply_token,
+                            messages=[TextMessage(text=text)]
+                        )
+                    )
+                    logger.info("Pure text LINE reply sent successfully!")
+                except Exception as ex:
+                    err_str = str(ex)
+                    if ("reply token" in err_str.lower() or "400" in err_str) and user_id:
+                        logger.info("Reply token failed (pure text). Falling back to Push Message.")
+                        MessagingApi(api_client).push_message_with_http_info(
+                            PushMessageRequest(
+                                to=user_id,
+                                messages=[TextMessage(text=text)]
+                            )
+                        )
+                        logger.info("Fallback pure text LINE Push Message sent successfully!")
+                    else:
+                        raise ex
     except Exception as e:
         logger.error({"msg": "reply_text failed", "error": str(e)})
 
 
 def handle_text_event(company: dict, user_id: str, reply_token: str, user_message: str):
     """RAG + LLM 推理 + LINE 回覆"""
+    import time
+    start_time = time.time()
     
     # ── 攔截 AI 生圖與生片指令 ──
     msg_lower = user_message.lower().strip()
     if msg_lower.startswith("/draw ") or msg_lower.startswith("/畫圖 "):
         prompt = user_message[6:].strip()
         if not prompt:
-            reply_text(company, reply_token, "請輸入繪圖提示詞，例如：/draw 一隻戴著墨鏡的貓")
+            reply_text(company, reply_token, "請輸入繪圖提示詞，例如：/draw 一隻戴著墨鏡的貓", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
             return
             
         try:
@@ -559,30 +683,42 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
             if img_url:
                 user_last_image[user_id] = img_url
                 
+                use_push = (time.time() - start_time) >= 4.2
                 config = Configuration(access_token=company['line_access_token'])
                 with ApiClient(config) as api_client:
-                    MessagingApi(api_client).reply_message_with_http_info(
-                        ReplyMessageRequest(
-                            reply_token=reply_token,
-                            messages=[
-                                ImageMessage(original_content_url=img_url, preview_image_url=img_url),
-                                TextMessage(text=f"✨ 這是為您生成的圖片！\n指令: {prompt}\n\n💡 提示：輸入「/video」或「/動起來」可以將此圖片轉為短影片喔！")
-                            ]
+                    msgs = [
+                        ImageMessage(original_content_url=img_url, preview_image_url=img_url),
+                        TextMessage(text=f"✨ 這是為您生成的圖片！\n指令: {prompt}\n\n💡 提示：輸入「/video」或「/動起來」可以將此圖片轉為短影片喔！")
+                    ]
+                    if use_push:
+                        MessagingApi(api_client).push_message_with_http_info(
+                            PushMessageRequest(to=user_id, messages=msgs)
                         )
-                    )
+                    else:
+                        try:
+                            MessagingApi(api_client).reply_message_with_http_info(
+                                ReplyMessageRequest(reply_token=reply_token, messages=msgs)
+                            )
+                        except Exception as ex:
+                            if "reply token" in str(ex).lower() or "400" in str(ex):
+                                MessagingApi(api_client).push_message_with_http_info(
+                                    PushMessageRequest(to=user_id, messages=msgs)
+                                )
+                            else:
+                                raise ex
                 return
             else:
-                reply_text(company, reply_token, "抱歉，圖片生成失敗，請稍候重試。")
+                reply_text(company, reply_token, "抱歉，圖片生成失敗，請稍候重試。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
                 return
         except Exception as e:
             logger.error({"msg": "LINE /draw failed", "error": str(e)})
-            reply_text(company, reply_token, "抱歉，圖片生成服務目前不可用。")
+            reply_text(company, reply_token, "抱歉，圖片生成服務目前不可用。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
             return
             
     elif msg_lower == "/video" or msg_lower == "/動起來":
         img_url = user_last_image.get(user_id)
         if not img_url:
-            reply_text(company, reply_token, "您最近沒有生成過圖片喔！請先使用「/draw 您的指令」生成一張圖片。")
+            reply_text(company, reply_token, "您最近沒有生成過圖片喔！請先使用「/draw 您的指令」生成一張圖片。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
             return
             
         try:
@@ -593,28 +729,40 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
             
             video_url = generate_video(img_url)
             if video_url:
+                use_push = (time.time() - start_time) >= 4.2
                 config = Configuration(access_token=company['line_access_token'])
                 with ApiClient(config) as api_client:
-                    MessagingApi(api_client).reply_message_with_http_info(
-                        ReplyMessageRequest(
-                            reply_token=reply_token,
-                            messages=[
-                                VideoMessage(
-                                    original_content_url=video_url, 
-                                    preview_image_url=img_url,
-                                    tracking_id=f"vid_{user_id[:8]}"
-                                ),
-                                TextMessage(text="🎬 您的動態短影片已生成完成！")
-                            ]
+                    msgs = [
+                        VideoMessage(
+                            original_content_url=video_url, 
+                            preview_image_url=img_url,
+                            tracking_id=f"vid_{user_id[:8]}"
+                        ),
+                        TextMessage(text="🎬 您的動態短影片已生成完成！")
+                    ]
+                    if use_push:
+                        MessagingApi(api_client).push_message_with_http_info(
+                            PushMessageRequest(to=user_id, messages=msgs)
                         )
-                    )
+                    else:
+                        try:
+                            MessagingApi(api_client).reply_message_with_http_info(
+                                ReplyMessageRequest(reply_token=reply_token, messages=msgs)
+                            )
+                        except Exception as ex:
+                            if "reply token" in str(ex).lower() or "400" in str(ex):
+                                MessagingApi(api_client).push_message_with_http_info(
+                                    PushMessageRequest(to=user_id, messages=msgs)
+                                )
+                            else:
+                                raise ex
                 return
             else:
-                reply_text(company, reply_token, "抱歉，影片生成失敗（可能 Hugging Face 佇列擁擠），請稍候重試。")
+                reply_text(company, reply_token, "抱歉，影片生成失敗（可能 Hugging Face 佇列擁擠），請稍候重試。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
                 return
         except Exception as e:
             logger.error({"msg": "LINE /video failed", "error": str(e)})
-            reply_text(company, reply_token, "抱歉，影片生成服務目前不可用。")
+            reply_text(company, reply_token, "抱歉，影片生成服務目前不可用。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
             return
 
     # ── 正常 RAG + LLM 對話流程 ──
@@ -649,7 +797,7 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
     assets_block += "```json\n"
     assets_block += "[FLEX_CARD]\n"
     assets_block += "{\n"
-    assets_block += '  "imageUrl": "圖片的 HTTPS URL，若無適合 the 圖片，請設為 null 或是留空，優先選用下方已上傳的資產圖片",\n'.replace("the", "的")
+    assets_block += '  "imageUrl": "圖片的 HTTPS URL，若無適合的圖片，請設為 null 或是留空，優先選用下方已上傳的資產圖片",\n'
     assets_block += '  "title": "圖卡標題 (15字以內)",\n'
     assets_block += '  "text": "圖卡說明描述 (30字以內)",\n'
     assets_block += '  "buttons": [\n'
@@ -702,7 +850,7 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
             # 回覆 LINE
             config = Configuration(access_token=company['line_access_token'])
             with ApiClient(config) as api_client:
-                reply_with_flex_or_text(api_client, reply_token, company.get('name', 'AI 客服助理'), ai_reply, logo_url=company.get('logo_url'))
+                reply_with_flex_or_text(api_client, reply_token, company.get('name', 'AI 客服助理'), ai_reply, logo_url=company.get('logo_url'), user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
             return
 
         # 如果有匹配到資料，則在 system_prompt 加上極嚴格的安全限制
@@ -712,8 +860,8 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
             "\n\n【重要安全指令】\n"
             "請「只」根據上面提供的「公司相關資料」回答問題。如果資料中沒有提到答案，或資料不足以完整回答，"
             "請一律直接回答「抱歉，在我的知識庫中找不到與此問題相關的資訊。」。\n"
-            "絕對不可使用你本身的通用知識編造任何資訊，不可與用戶閒聊、講笑話或進行 any 與資料無關的對話。"
-        ).replace("any", "任何")
+            "絕對不可使用你本身的通用知識編造任何資訊，不可與用戶閒聊、講笑話或進行任何與資料無關的對話。"
+        )
     else:
         # 正常 RAG 模式
         if docs:
@@ -795,7 +943,7 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
     # 7. 回覆 LINE
     config = Configuration(access_token=company['line_access_token'])
     with ApiClient(config) as api_client:
-        reply_with_flex_or_text(api_client, reply_token, company.get('name', 'AI 客服助理'), ai_reply, logo_url=company.get('logo_url'))
+        reply_with_flex_or_text(api_client, reply_token, company.get('name', 'AI 客服助理'), ai_reply, logo_url=company.get('logo_url'), user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
 # ============================================
 # 路由：多租戶 Webhook 入口（單一路由，乾淨正確）
 # ============================================
@@ -825,7 +973,8 @@ def callback(company_slug: str):
     except Exception:
         pass  # handler.handle raises if no @handler.add registered — that's OK
 
-    # 3. 手動解析事件（因為 handler 是動態建立的，無法用裝飾器）
+    # 3. 手動解析事件 (使用背景執行緒以秒回 200 OK，防止 LINE 逾時)
+    import threading
     events = json.loads(body).get('events', [])
     for event in events:
         if event.get('type') != 'message':
@@ -833,12 +982,11 @@ def callback(company_slug: str):
         if event.get('message', {}).get('type') != 'text':
             continue
 
-        handle_text_event(
-            company=company,
-            user_id=event['source']['userId'],
-            reply_token=event['replyToken'],
-            user_message=event['message']['text']
-        )
+        threading.Thread(
+            target=handle_text_event,
+            args=(company, event['source']['userId'], event['replyToken'], event['message']['text']),
+            daemon=True
+        ).start()
 
     return 'OK'
 

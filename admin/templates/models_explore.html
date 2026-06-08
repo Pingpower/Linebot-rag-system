@@ -70,6 +70,82 @@
       </div>
     </div>
   </div>
+  <!-- 知識庫 RAG 整理 LLM 配置卡片 -->
+  <div class="card mb-4" style="background: rgba(99, 102, 241, 0.03); border: 1px solid rgba(99, 102, 241, 0.2);">
+    <div class="card-header" style="border-bottom: 1px solid rgba(99, 102, 241, 0.15); display: flex; justify-content: space-between; align-items: center;">
+      <div class="card-title">⚙️ 知識庫 RAG 整理外部 LLM 配置</div>
+      <span class="badge" id="knowledge-status-badge" style="background: rgba(99, 102, 241, 0.15); color: var(--primary);">載入中...</span>
+    </div>
+    <div class="card-body" style="padding: 20px;">
+      <div style="display: flex; flex-direction: column; gap: 15px;">
+        <p class="hint" style="color: var(--text-muted); margin-bottom: 5px;">
+          此處設定將用於<b>後台「AI 知識萃取與整理」</b>階段。當處理長文本或大文檔時，推薦使用 Google Gemini 或其他雲端高階模型以獲得最佳結構化效果。
+        </p>
+        
+        <!-- 供應商選擇 -->
+        <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
+          <span style="font-size: 14px; font-weight: 600; min-width: 120px;">選擇 LLM 供應商:</span>
+          <select id="knowledge-provider-select" onchange="onKnowledgeProviderChange()" style="padding: 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); outline: none; min-width: 250px; cursor: pointer;">
+            <option value="local">本地推論引擎 (llama-server)</option>
+            <option value="gemini">Google Gemini API</option>
+            <option value="nvidia">NVIDIA NIM API</option>
+            <option value="openrouter">OpenRouter API</option>
+          </select>
+        </div>
+
+        <!-- Gemini 設定區塊 -->
+        <div id="config-group-gemini" class="provider-config-group" style="display: none; flex-direction: column; gap: 12px; border-left: 3px solid var(--primary); padding-left: 15px; margin-top: 5px;">
+          <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
+            <span style="font-size: 13px; font-weight: 500; min-width: 120px;">Gemini API Key:</span>
+            <div style="display: flex; gap: 10px; flex: 1; min-width: 280px;">
+              <input type="password" id="gemini-key-input" placeholder="請輸入您的 Gemini API Key" style="flex: 1; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); outline: none;">
+              <button class="btn btn-outline btn-sm" id="btn-toggle-gemini" onclick="toggleProviderKeyVisibility('gemini')" style="white-space: nowrap;">👁️ 顯示</button>
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
+            <span style="font-size: 13px; font-weight: 500; min-width: 120px;">使用模型型號:</span>
+            <input type="text" id="gemini-model-input" value="gemini-2.5-flash" placeholder="例如: gemini-2.5-flash" style="flex: 1; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); outline: none; min-width: 280px;">
+          </div>
+        </div>
+
+        <!-- NVIDIA 設定區塊 -->
+        <div id="config-group-nvidia" class="provider-config-group" style="display: none; flex-direction: column; gap: 12px; border-left: 3px solid #10B981; padding-left: 15px; margin-top: 5px;">
+          <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
+            <span style="font-size: 13px; font-weight: 500; min-width: 120px;">NVIDIA API Key:</span>
+            <div style="display: flex; gap: 10px; flex: 1; min-width: 280px;">
+              <input type="password" id="nvidia-key-input" placeholder="請輸入您的 NVIDIA NIM API Key" style="flex: 1; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); outline: none;">
+              <button class="btn btn-outline btn-sm" id="btn-toggle-nvidia" onclick="toggleProviderKeyVisibility('nvidia')" style="white-space: nowrap;">👁️ 顯示</button>
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
+            <span style="font-size: 13px; font-weight: 500; min-width: 120px;">使用模型型號:</span>
+            <input type="text" id="nvidia-model-input" value="meta/llama-3.1-405b-instruct" placeholder="例如: meta/llama-3.1-405b-instruct" style="flex: 1; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); outline: none; min-width: 280px;">
+          </div>
+        </div>
+
+        <!-- OpenRouter 設定區塊 -->
+        <div id="config-group-openrouter" class="provider-config-group" style="display: none; flex-direction: column; gap: 12px; border-left: 3px solid #F59E0B; padding-left: 15px; margin-top: 5px;">
+          <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
+            <span style="font-size: 13px; font-weight: 500; min-width: 120px;">OpenRouter Key:</span>
+            <div style="display: flex; gap: 10px; flex: 1; min-width: 280px;">
+              <input type="password" id="openrouter-key-input" placeholder="請輸入您的 OpenRouter API Key" style="flex: 1; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); outline: none;">
+              <button class="btn btn-outline btn-sm" id="btn-toggle-openrouter" onclick="toggleProviderKeyVisibility('openrouter')" style="white-space: nowrap;">👁️ 顯示</button>
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
+            <span style="font-size: 13px; font-weight: 500; min-width: 120px;">使用模型型號:</span>
+            <input type="text" id="openrouter-model-input" value="google/gemini-2.5-flash" placeholder="例如: google/gemini-2.5-flash" style="flex: 1; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); outline: none; min-width: 280px;">
+          </div>
+        </div>
+        
+        <!-- 儲存按鈕 -->
+        <div style="display: flex; justify-content: flex-end; margin-top: 5px;">
+          <button class="btn btn-primary" onclick="saveKnowledgeConfig()" style="padding: 10px 30px; font-weight: 600;">儲存知識庫模型設定</button>
+        </div>
+
+      </div>
+    </div>
+  </div>
 
   <div class="layout-grid">
     <!-- 左側：本地已下載模型與切換 -->
@@ -167,7 +243,12 @@
         <div class="card">
           <div class="card-body" style="padding: 20px;">
             <div class="search-bar-wrap mb-4" style="display: flex; gap: 10px;">
-              <input type="text" id="hf-search-input" placeholder="搜尋 Hugging Face GGUF 模型 (例如: qwen, llama, gemma)..." style="flex: 1;">
+              <input type="text" id="hf-search-input" placeholder="搜尋 Hugging Face GGUF 模型 (例如: qwen, llama, gemma)..." style="flex: 1; min-width: 0;">
+              <select id="hf-sort-select" style="padding: 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); outline: none; width: 200px; flex-shrink: 0; cursor: pointer;" onchange="searchHFModels()">
+                <option value="lastModified" selected>📅 最近更新 (Newest)</option>
+                <option value="downloads">📥 總下載量 (Downloads)</option>
+                <option value="likes">❤️ 最多按讚 (Likes)</option>
+              </select>
               <button class="btn btn-primary" onclick="searchHFModels()">搜尋</button>
             </div>
             
@@ -554,6 +635,7 @@
       loadHFTokenStatus();
       checkActiveDownloadsOnLoad();
       loadEngineConfig();
+      loadKnowledgeConfig();
   });
 
   // 頁面載入時檢查是否有進行中的下載任務
@@ -815,11 +897,12 @@
       const q = document.getElementById('hf-search-input').value.strip ? 
                 document.getElementById('hf-search-input').value.strip() : 
                 document.getElementById('hf-search-input').value;
+      const sortBy = document.getElementById('hf-sort-select').value;
       const grid = document.getElementById('hf-models-grid');
       grid.innerHTML = '<div class="text-center py-8 text-muted">正在搜尋 Hugging Face 模型...</div>';
       
       try {
-          const res = await fetch(`/api/models/search?q=${encodeURIComponent(q)}`);
+          const res = await fetch(`/api/models/search?q=${encodeURIComponent(q)}&sort=${sortBy}`);
           const data = await res.json();
           if (data.error) {
               grid.innerHTML = `<div class="text-center py-8 text-red">搜尋錯誤: ${data.error}</div>`;
@@ -832,7 +915,9 @@
           }
           
           grid.innerHTML = data.map(m => {
-              const suitableBadge = `<span class="badge" style="background: rgba(34, 197, 94, 0.15); color: var(--success);">適合本機 (6GB)</span>`;
+              const suitableBadge = m.suitable
+                  ? `<span class="badge" style="background: rgba(34, 197, 94, 0.15); color: var(--success);">適合本機 (6GB)</span>`
+                  : `<span class="badge" style="background: rgba(239, 68, 68, 0.15); color: var(--danger); border: 1px solid rgba(239, 68, 68, 0.2);">恐超顯存 (建議 >6GB)</span>`;
               
               return `
                   <div class="hf-card">
@@ -1224,8 +1309,130 @@
               input.value = "";
               loadHFTokenStatus();
           }
-      } catch (err) {
+    } catch (err) {
           alert("請求儲存金鑰失敗，請稍候重試！");
+      }
+  }
+
+  // 知識庫 LLM 供應商下拉選單切換時的 UI 動態顯示/隱藏
+  function onKnowledgeProviderChange() {
+      const select = document.getElementById('knowledge-provider-select');
+      const provider = select.value;
+      
+      // 先隱藏所有外部 API 設定區塊
+      const groups = document.querySelectorAll('.provider-config-group');
+      groups.forEach(g => g.style.display = 'none');
+      
+      // 根據供應商顯示特定區塊
+      if (provider === 'gemini') {
+          document.getElementById('config-group-gemini').style.display = 'flex';
+      } else if (provider === 'nvidia') {
+          document.getElementById('config-group-nvidia').style.display = 'flex';
+      } else if (provider === 'openrouter') {
+          document.getElementById('config-group-openrouter').style.display = 'flex';
+      }
+      
+      // 更新 badge 狀態文字
+      const badge = document.getElementById('knowledge-status-badge');
+      if (provider === 'local') {
+          badge.textContent = "本地 (llama-server)";
+          badge.style.background = "rgba(99, 102, 241, 0.15)";
+          badge.style.color = "var(--primary)";
+      } else {
+          badge.textContent = `雲端 (${provider.toUpperCase()})`;
+          badge.style.background = "rgba(16, 185, 129, 0.15)";
+          badge.style.color = "var(--success)";
+      }
+  }
+
+  // 載入現有知識庫 LLM 設定
+  async function loadKnowledgeConfig() {
+      try {
+          const res = await fetch('/api/system/knowledge-config');
+          const data = await res.json();
+          if (data.error) {
+              console.error("載入知識庫設定失敗:", data.error);
+              return;
+          }
+          
+          // 填入資料
+          document.getElementById('knowledge-provider-select').value = data.provider;
+          document.getElementById('gemini-key-input').value = data.gemini_key || "";
+          document.getElementById('gemini-model-input').value = data.gemini_model || "gemini-2.5-flash";
+          document.getElementById('nvidia-key-input').value = data.nvidia_key || "";
+          document.getElementById('nvidia-model-input').value = data.nvidia_model || "meta/llama-3.1-405b-instruct";
+          document.getElementById('openrouter-key-input').value = data.openrouter_key || "";
+          document.getElementById('openrouter-model-input').value = data.openrouter_model || "google/gemini-2.5-flash";
+          
+          // 觸發 UI 隱藏/顯示更新
+          onKnowledgeProviderChange();
+      } catch (err) {
+          console.error("請求知識庫設定錯誤:", err);
+      }
+  }
+
+  // 外部 API Key 明文切換
+  function toggleProviderKeyVisibility(provider) {
+      const input = document.getElementById(`${provider}-key-input`);
+      const btn = document.getElementById(`btn-toggle-${provider}`);
+      if (input.type === 'password') {
+          input.type = 'text';
+          btn.textContent = "🙈 隱藏";
+      } else {
+          input.type = 'password';
+          btn.textContent = "👁️ 顯示";
+      }
+  }
+
+  // 儲存設定到後端
+  async function saveKnowledgeConfig() {
+      const provider = document.getElementById('knowledge-provider-select').value;
+      const gemini_key = document.getElementById('gemini-key-input').value.trim();
+      const gemini_model = document.getElementById('gemini-model-input').value.trim();
+      const nvidia_key = document.getElementById('nvidia-key-input').value.trim();
+      const nvidia_model = document.getElementById('nvidia-model-input').value.trim();
+      const openrouter_key = document.getElementById('openrouter-key-input').value.trim();
+      const openrouter_model = document.getElementById('openrouter-model-input').value.trim();
+      
+      // 基本驗證
+      if (provider === 'gemini' && !gemini_key) {
+          alert("您選擇了 Gemini 供應商，請輸入 API Key！");
+          return;
+      }
+      if (provider === 'nvidia' && !nvidia_key) {
+          alert("您選擇了 NVIDIA NIM 供應商，請輸入 API Key！");
+          return;
+      }
+      if (provider === 'openrouter' && !openrouter_key) {
+          alert("您選擇了 OpenRouter 供應商，請輸入 API Key！");
+          return;
+      }
+
+      const payload = {
+          provider,
+          gemini_key,
+          gemini_model,
+          nvidia_key,
+          nvidia_model,
+          openrouter_key,
+          openrouter_model
+      };
+
+      try {
+          const res = await fetch('/api/system/knowledge-config', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+          });
+          const data = await res.json();
+          if (data.error) {
+              alert(`儲存失敗: ${data.error}`);
+          } else {
+              alert(data.msg);
+              loadKnowledgeConfig(); // 重新載入以顯示遮蔽後的金鑰
+          }
+      } catch (err) {
+          alert("發送儲存設定失敗，請確認網路連線！");
       }
   }
 </script>
