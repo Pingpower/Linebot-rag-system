@@ -1,0 +1,702 @@
+{% extends "base.html" %}
+
+{% block title %}圖文選單管理 - LINE Bot 管理後台{% endblock %}
+
+{% block page_title %}圖文選單管理{% endblock %}
+
+{% block content %}
+<div class="rich-menu-container">
+  
+  <!-- Top selector and Company warnings -->
+  <div class="card mb-4">
+    <div class="card-header">
+      <h3 class="card-title">選擇管理公司</h3>
+    </div>
+    <div class="form-section">
+      <form method="GET" action="{{ url_for('rich_menu') }}" id="companyForm" class="inline-form">
+        <label for="company_select">公司帳號：</label>
+        <select name="company_id" id="company_select" onchange="document.getElementById('companyForm').submit()">
+          {% for c in companies %}
+            <option value="{{ c.id }}" {% if selected and selected.id == c.id %}selected{% endif %}>
+              {{ c.name }} ({{ c.slug }})
+            </option>
+          {% endfor %}
+        </select>
+      </form>
+      
+      {% if selected %}
+        {% if not selected.line_access_token or not selected.line_channel_secret %}
+          <div class="alert alert-error mt-6" style="margin-bottom:0;">
+            ⚠️ <strong>警告：</strong> 該公司尚未配置 LINE 存取憑證 (Access Token) 或 Channel Secret。請先至 
+            <a href="{{ url_for('company_edit', company_id=selected.id) }}" style="text-decoration: underline; color: #fca5a5;">公司管理頁面</a> 
+            完成 LINE 串接設定，否則無法註冊圖文選單。
+          </div>
+        {% endif %}
+      {% else %}
+        <div class="alert alert-error mt-6" style="margin-bottom:0;">
+          ⚠️ 系統中尚無任何公司資料。請先至公司管理建立公司。
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if selected %}
+  <div class="layout-grid">
+    
+    <!-- Left column: Active & Historical Rich Menus -->
+    <div class="left-col">
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">已建立之圖文選單</h3>
+        </div>
+        <div class="form-section">
+          {% if not menus %}
+            <div class="text-center py-8 text-muted">
+              <span style="font-size: 24px;">🖼️</span>
+              <p style="margin-top: 8px;">此公司尚未在 LINE 註冊任何圖文選單。</p>
+            </div>
+          {% else %}
+            <div class="rich-menu-list">
+              {% for m in menus %}
+                <div class="menu-item-card {% if m.is_active %}active-border{% endif %}">
+                  <div class="menu-item-preview">
+                    {% if m.image_url %}
+                      <img src="{{ m.image_url }}" alt="{{ m.name }}">
+                    {% else %}
+                      <div class="no-image">無預覽圖片</div>
+                    {% endif %}
+                  </div>
+                  <div class="menu-item-info">
+                    <div class="menu-item-header">
+                      <span class="menu-name">{{ m.name }}</span>
+                      {% if m.is_active %}
+                        <span class="badge" style="background: rgba(34,197,94,.15); color: var(--success);">● 啟用中</span>
+                      {% else %}
+                        <span class="badge" style="background: var(--surface2); color: var(--text-muted);">已停用</span>
+                      {% endif %}
+                    </div>
+                    <div class="menu-meta">
+                      <p><strong>選單底部文字:</strong> <span>{{ m.chat_bar_text }}</span></p>
+                      <p><strong>LINE ID:</strong> <code class="menu-id">{{ m.rich_menu_id }}</code></p>
+                      <p><strong>建立於:</strong> <span>{{ m.created_at }}</span></p>
+                    </div>
+                    
+                    <div class="menu-actions">
+                      {% if m.is_active %}
+                        <button class="btn btn-outline btn-sm btn-deactivate" data-menu-id="{{ m.rich_menu_id }}">停用</button>
+                      {% else %}
+                        <button class="btn btn-primary btn-sm btn-activate" data-menu-id="{{ m.rich_menu_id }}">啟用預設</button>
+                      {% endif %}
+                      <button class="btn btn-danger btn-sm btn-delete" data-menu-id="{{ m.rich_menu_id }}">刪除</button>
+                    </div>
+                  </div>
+                </div>
+              {% endfor %}
+            </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    
+    <!-- Right column: Create Menu Form -->
+    <div class="right-col">
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">新增圖文選單</h3>
+        </div>
+        <form id="uploadForm" enctype="multipart/form-data" class="rich-form">
+          <div class="form-section">
+            <div class="form-group">
+              <label for="menu_name"><span class="required">*</span> 圖文選單名稱 (Name)</label>
+              <input type="text" id="menu_name" name="name" placeholder="例：老莫可可預設選單 (限 300 字)" required>
+              <span class="hint">僅在後台管理辨識，不會顯示給使用者。</span>
+            </div>
+            
+            <div class="form-group">
+              <label for="chat_bar_text"><span class="required">*</span> 選單底部文字 (Chat Bar Text)</label>
+              <input type="text" id="chat_bar_text" name="chat_bar_text" placeholder="例：開啟選單 (限 14 字)" required max="14">
+              <span class="hint">顯示在 LINE 視窗最下方的觸發列。</span>
+            </div>
+            
+            <div class="form-group">
+              <label for="image"><span class="required">*</span> 選單背景圖片</label>
+              <input type="file" id="image" name="image" accept="image/png, image/jpeg" required>
+              <span class="hint">必須符合規格：寬度 1200px、高度 810px，且限制小於 1MB。</span>
+              <div id="image-validation-msg" class="text-red text-sm" style="display:none; margin-top:4px;"></div>
+            </div>
+
+            <!-- Resolution and hidden coords inputs -->
+            <input type="hidden" id="img_width" name="width" value="1200">
+            <input type="hidden" id="img_height" name="height" value="810">
+            <input type="hidden" id="areas_payload" name="areas" value="[]">
+
+            <div class="form-group">
+              <label for="template_select">選單版型範本</label>
+              <select id="template_select">
+                <option value="2x3" selected>2排3格 (最常用 - 6按鈕)</option>
+                <option value="1x3">1排3格 (下排單層 - 3按鈕)</option>
+                <option value="1x1">全幅單格 (1按鈕)</option>
+              </select>
+            </div>
+
+            <!-- Virtual grid visualization -->
+            <div class="grid-preview-container">
+              <span class="hint">熱區示意圖 (點擊下方設定各區動作)：</span>
+              <div id="grid-preview" class="grid-preview-2x3">
+                <!-- Javascript will render grid cells here -->
+              </div>
+            </div>
+          </div>
+
+          <div class="form-section">
+            <h4 class="section-title">熱區按鈕動作配置</h4>
+            <div id="action-inputs-container">
+              <!-- JS dynamically generates action input forms here -->
+            </div>
+          </div>
+
+          <div class="form-actions">
+            <span id="loading-spinner" class="spinner" style="display:none;">⏳ 處理中...</span>
+            <button type="submit" class="btn btn-primary" id="btn-submit-upload" {% if not selected.line_access_token %}disabled{% endif %}>
+              🚀 註冊並上傳至 LINE
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+  </div>
+  {% endif %}
+
+</div>
+
+<style>
+/* CSS Styles tailored to base.html dark design system */
+.rich-menu-container {
+  display: flex;
+  flex-direction: column;
+}
+.layout-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+@media (max-width: 1024px) {
+  .layout-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Menu items list */
+.rich-menu-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.menu-item-card {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  overflow: hidden;
+  transition: all 0.2s;
+}
+.menu-item-card.active-border {
+  border-color: var(--primary);
+  box-shadow: 0 0 10px rgba(99,102,241,0.25);
+}
+.menu-item-preview {
+  width: 150px;
+  background: rgba(0,0,0,0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  position: relative;
+}
+.menu-item-preview img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.menu-item-preview .no-image {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.menu-item-info {
+  flex: 1;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+.menu-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.menu-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+.menu-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.menu-meta p {
+  display: flex;
+  justify-content: space-between;
+  border-bottom: 1px dashed rgba(255,255,255,0.05);
+  padding-bottom: 2px;
+}
+.menu-id {
+  background: #0f172a;
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+.menu-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Grid preview */
+.grid-preview-container {
+  margin-top: 14px;
+}
+#grid-preview {
+  display: grid;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  aspect-ratio: 1200/810;
+  margin-top: 8px;
+  overflow: hidden;
+}
+.grid-cell {
+  border: 1px dashed rgba(255,255,255,0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 16px;
+  color: var(--text-muted);
+  background: rgba(255,255,255,0.02);
+  transition: all 0.15s;
+  cursor: pointer;
+}
+.grid-cell:hover {
+  background: rgba(99,102,241,0.15);
+  color: var(--primary);
+  border-color: var(--primary);
+}
+.grid-cell.highlight {
+  background: rgba(99,102,241,0.25);
+  color: #fff;
+  border-color: var(--primary);
+}
+
+/* Action inputs forms */
+.action-box {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 12px;
+}
+.action-box-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--primary);
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.action-row {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.action-row label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.action-row select, .action-row input {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+/* Spinner helper */
+.spinner {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-right: 12px;
+}
+</style>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+  const companyId = "{{ selected.id if selected else '' }}";
+  
+  const imgInput = document.getElementById("image");
+  const imgWidthHidden = document.getElementById("img_width");
+  const imgHeightHidden = document.getElementById("img_height");
+  const imageValMsg = document.getElementById("image-validation-msg");
+  
+  const templateSelect = document.getElementById("template_select");
+  const gridPreview = document.getElementById("grid-preview");
+  const actionInputsContainer = document.getElementById("action-inputs-container");
+  
+  const uploadForm = document.getElementById("uploadForm");
+  const areasPayload = document.getElementById("areas_payload");
+  const loadingSpinner = document.getElementById("loading-spinner");
+  const btnSubmit = document.getElementById("btn-submit-upload");
+
+  // Validate Image size and dimensions
+  imgInput.addEventListener("change", function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    // Check size < 1MB
+    if (file.size > 1024 * 1024) {
+      showImgError("圖片檔案大小超過 1MB 限制 (實際大小: " + (file.size/1024/1024).toFixed(2) + "MB)");
+      return;
+    }
+    
+    // Check dimensions
+    const reader = new FileReader();
+    reader.onload = function(evt) {
+      const img = new Image();
+      img.onload = function() {
+        const w = img.naturalWidth;
+        const h = img.naturalHeight;
+        
+        // Allowed combinations:
+        // 2500x1686, 2500x843, 1200x810, 1200x405
+        const valid = (w === 1200 && h === 810);
+                      
+        if (!valid) {
+          showImgError("圖片尺寸不合規範：" + w + "x" + h + "px。請使用寬度 1200px、高度 810px 的圖片。");
+          return;
+        }
+        
+        // Success
+        imageValMsg.style.display = "none";
+        imgWidthHidden.value = w;
+        imgHeightHidden.value = h;
+        btnSubmit.disabled = false;
+        
+        // Update aspect ratio of visual grid preview
+        gridPreview.style.aspectRatio = w + "/" + h;
+      };
+      img.src = evt.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+
+  function showImgError(msg) {
+    imageValMsg.textContent = msg;
+    imageValMsg.style.display = "block";
+    imgInput.value = ""; // Clear file input
+    btnSubmit.disabled = true;
+  }
+
+  // Visual layout templates configurations
+  const templates = {
+    "2x3": {
+      name: "2排3格 (6 按鈕)",
+      rows: 2,
+      cols: 3,
+      cells: ["A", "B", "C", "D", "E", "F"]
+    },
+    "1x3": {
+      name: "1排3格 (3 按鈕)",
+      rows: 1,
+      cols: 3,
+      cells: ["A", "B", "C"]
+    },
+    "1x1": {
+      name: "全幅單格 (1 按鈕)",
+      rows: 1,
+      cols: 1,
+      cells: ["A"]
+    }
+  };
+
+  // Re-generate visual grid and action fields when template selection changes
+  templateSelect.addEventListener("change", renderGridAndActions);
+
+  function renderGridAndActions() {
+    const layout = templates[templateSelect.value];
+    
+    // 1. Update Grid Preview layout
+    gridPreview.className = ""; 
+    gridPreview.style.display = "grid";
+    gridPreview.style.gridTemplateRows = `repeat(${layout.rows}, 1fr)`;
+    gridPreview.style.gridTemplateColumns = `repeat(${layout.cols}, 1fr)`;
+    
+    gridPreview.innerHTML = "";
+    layout.cells.forEach(label => {
+      const cell = document.createElement("div");
+      cell.className = "grid-cell";
+      cell.textContent = "按鈕 " + label;
+      cell.dataset.cell = label;
+      
+      // Bind hover state with corresponding action input box
+      cell.addEventListener("mouseenter", () => {
+        const box = document.getElementById("action-box-" + label);
+        if (box) box.style.borderColor = "var(--primary)";
+      });
+      cell.addEventListener("mouseleave", () => {
+        const box = document.getElementById("action-box-" + label);
+        if (box) box.style.borderColor = "var(--border)";
+      });
+      
+      gridPreview.appendChild(cell);
+    });
+
+    // 2. Generate Action Input fields
+    actionInputsContainer.innerHTML = "";
+    layout.cells.forEach((label, idx) => {
+      const actionBox = document.createElement("div");
+      actionBox.className = "action-box";
+      actionBox.id = "action-box-" + label;
+      
+      actionBox.innerHTML = `
+        <div class="action-box-title">
+          <span>🔘 按鈕 ${label} 動作設定</span>
+        </div>
+        <div class="action-row">
+          <label>動作類型：</label>
+          <select class="action-type" data-cell="${label}">
+            <option value="message">發送文字 (Message)</option>
+            <option value="postback" selected>連動客服 (Postback)</option>
+            <option value="uri">開啟網址 (URI)</option>
+          </select>
+        </div>
+        <div class="action-row action-label-row">
+          <label>動作標籤：</label>
+          <input type="text" class="action-label" data-cell="${label}" placeholder="選填，例：客服" max="20">
+        </div>
+        <div class="action-row action-param-row">
+          <label class="param-label">設定內容：</label>
+          <div style="display:flex; flex-direction:column; gap:4px; width:100%;">
+            <input type="text" class="action-param-val" data-cell="${label}" placeholder="請輸入值" required>
+            <span class="hint param-hint">用戶點擊將透過智慧客服進行檢索。</span>
+          </div>
+        </div>
+      `;
+      
+      actionInputsContainer.appendChild(actionBox);
+      
+      // Setup dynamic placeholders & hints based on action type selection
+      const typeSelect = actionBox.querySelector(".action-type");
+      const paramInput = actionBox.querySelector(".action-param-val");
+      const paramLabel = actionBox.querySelector(".param-label");
+      const paramHint = actionBox.querySelector(".param-hint");
+      
+      function updateFields() {
+        const type = typeSelect.value;
+        if (type === "message") {
+          paramLabel.textContent = "發送文字：";
+          paramInput.placeholder = "例：老莫可可營業時間";
+          paramHint.textContent = "用戶點擊時，將於聊天室中以自己的名義發送此文字。";
+        } else if (type === "postback") {
+          paramLabel.textContent = "客服關鍵字：";
+          paramInput.placeholder = "例：老莫產品介紹";
+          paramHint.textContent = "背景向智慧客服發送查詢，客服會直接回覆對應答案，不污染使用者視窗。";
+        } else if (type === "uri") {
+          paramLabel.textContent = "連結網址：";
+          paramInput.placeholder = "例：https://www.laomococoa.com.tw/";
+          paramHint.textContent = "用戶點擊時將彈出視窗並開啟此 URL 連結。";
+        }
+      }
+      
+      typeSelect.addEventListener("change", updateFields);
+      updateFields(); // Initial call
+      
+      // Auto-focus on grid hover
+      actionBox.addEventListener("mouseenter", () => {
+        const cell = gridPreview.querySelector(`.grid-cell[data-cell="${label}"]`);
+        if (cell) cell.classList.add("highlight");
+      });
+      actionBox.addEventListener("mouseleave", () => {
+        const cell = gridPreview.querySelector(`.grid-cell[data-cell="${label}"]`);
+        if (cell) cell.classList.remove("highlight");
+      });
+    });
+  }
+
+  // Run rendering once initially
+  if (gridPreview) {
+    renderGridAndActions();
+  }
+
+  // Handle Form Submission via AJAX
+  if (uploadForm) {
+    uploadForm.addEventListener("submit", function(e) {
+      e.preventDefault();
+      
+      // 1. Calculate and pack Areas coords payload
+      const layout = templates[templateSelect.value];
+      const w = parseInt(imgWidthHidden.value);
+      const h = parseInt(imgHeightHidden.value);
+      
+      const cellWidth = Math.round(w / layout.cols);
+      const cellHeight = Math.round(h / layout.rows);
+      
+      const areasList = [];
+      const boxes = actionInputsContainer.querySelectorAll(".action-box");
+      
+      boxes.forEach((box, idx) => {
+        const label = layout.cells[idx];
+        const rowIdx = Math.floor(idx / layout.cols);
+        const colIdx = idx % layout.cols;
+        
+        // Coords bounding calculation with final pixel padding
+        const bx = colIdx * cellWidth;
+        const by = rowIdx * cellHeight;
+        const bw = (colIdx === layout.cols - 1) ? (w - bx) : cellWidth;
+        const bh = (rowIdx === layout.rows - 1) ? (h - by) : cellHeight;
+        
+        const type = box.querySelector(".action-type").value;
+        const actLabel = box.querySelector(".action-label").value.trim() || `Button ${label}`;
+        const val = box.querySelector(".action-param-val").value.trim();
+        
+        let actionObj = { type: type, label: actLabel };
+        if (type === "message") {
+          actionObj.text = val;
+        } else if (type === "postback") {
+          actionObj.data = `action=rag_query&text=${encodeURIComponent(val)}`;
+          actionObj.text = val; // Display sent message bubble (simulates regular text input)
+        } else if (type === "uri") {
+          actionObj.uri = val;
+        }
+        
+        areasList.push({
+          bounds: { x: bx, y: by, width: bw, height: bh },
+          action: actionObj
+        });
+      });
+      
+      areasPayload.value = JSON.stringify(areasList);
+      
+      // 2. Perform upload API call
+      loadingSpinner.style.display = "inline";
+      btnSubmit.disabled = true;
+      
+      const formData = new FormData(uploadForm);
+      
+      fetch(`/companies/${companyId}/richmenu/upload`, {
+        method: "POST",
+        body: formData
+      })
+      .then(res => res.json())
+      .then(data => {
+        loadingSpinner.style.display = "none";
+        btnSubmit.disabled = false;
+        if (data.success) {
+          alert("圖文選單建立成功！");
+          window.location.reload();
+        } else {
+          alert("錯誤：" + (data.error || "未知錯誤"));
+        }
+      })
+      .catch(err => {
+        loadingSpinner.style.display = "none";
+        btnSubmit.disabled = false;
+        console.error(err);
+        alert("伺服器連線失敗，請稍後重試。");
+      });
+    });
+  }
+
+  // Handle Activate buttons
+  document.querySelectorAll(".btn-activate").forEach(btn => {
+    btn.addEventListener("click", function() {
+      const menuId = this.dataset.menuId;
+      if (!confirm("確定要將此選單啟用為 LINE 的預設圖文選單嗎？")) return;
+      
+      this.disabled = true;
+      fetch(`/companies/${companyId}/richmenu/${menuId}/activate`, { method: "POST" })
+      .then(res => res.json())
+      .then(data => {
+        if (data.success) {
+          window.location.reload();
+        } else {
+          alert("啟用失敗：" + data.error);
+          this.disabled = false;
+        }
+      })
+      .catch(err => {
+        console.error(err);
+        alert("操作失敗，網路或伺服器連線錯誤。");
+        this.disabled = false;
+      });
+    });
+  });
+
+  // Handle Deactivate buttons
+  document.querySelectorAll(".btn-deactivate").forEach(btn => {
+    btn.addEventListener("click", function() {
+      if (!confirm("確定要停用目前所有的預設圖文選單嗎？停用後用戶將看不到選單。")) return;
+      
+      this.disabled = true;
+      fetch(`/companies/${companyId}/richmenu/deactivate`, { method: "POST" })
+      .then(res => res.json())
+      .then(data => {
+        if (data.success) {
+          window.location.reload();
+        } else {
+          alert("停用失敗：" + data.error);
+          this.disabled = false;
+        }
+      })
+      .catch(err => {
+        console.error(err);
+        alert("操作失敗，網路或伺服器連線錯誤。");
+        this.disabled = false;
+      });
+    });
+  });
+
+  // Handle Delete buttons
+  document.querySelectorAll(".btn-delete").forEach(btn => {
+    btn.addEventListener("click", function() {
+      const menuId = this.dataset.menuId;
+      if (!confirm("⚠️ 警告：確定要刪除此選單嗎？這將同時從 LINE 伺服器與本機資料庫移除該選單，此操作無法復原。")) return;
+      
+      this.disabled = true;
+      fetch(`/companies/${companyId}/richmenu/${menuId}/delete`, { method: "POST" })
+      .then(res => res.json())
+      .then(data => {
+        if (data.success) {
+          window.location.reload();
+        } else {
+          alert("刪除失敗：" + data.error);
+          this.disabled = false;
+        }
+      })
+      .catch(err => {
+        console.error(err);
+        alert("操作失敗，網路或伺服器連線錯誤。");
+        this.disabled = false;
+      });
+    });
+  });
+
+});
+</script>
+{% endblock %}

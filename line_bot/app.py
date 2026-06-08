@@ -19,7 +19,8 @@ from linebot.v3.messaging import (
     FlexMessage,
     FlexContainer,
     ImageMessage,
-    VideoMessage
+    VideoMessage,
+    ShowLoadingAnimationRequest
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
@@ -81,73 +82,62 @@ def get_company(slug: str) -> dict | None:
     return None
 
 
+def get_embedding(text: str) -> list[float] | None:
+    """取得 3072 維度的 Gemini embedding"""
+    gemini_key = os.getenv("GEMINI_API_KEY", "")
+    if not gemini_key:
+        logger.error("GEMINI_API_KEY not found in environment.")
+        return None
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-embedding-2:embedContent?key={gemini_key}"
+    payload = {
+        "model": "models/gemini-embedding-2",
+        "content": {"parts": [{"text": text}]}
+    }
+    try:
+        import requests
+        r = requests.post(url, json=payload, timeout=10)
+        if r.status_code == 200:
+            return r.json()['embedding']['values']
+        else:
+            logger.error(f"Gemini API Error: {r.status_code} - {r.text}")
+    except Exception as e:
+        logger.error(f"get_embedding failed: {e}")
+    return None
+
+
 def search_knowledge(company_id: str, query: str, limit: int = 3) -> list[dict]:
-    """全文搜尋公司知識庫（以 Python 本地字元/N-Gram 評分做中文模糊檢索，解決 Postgres Simple FTS 斷詞問題）"""
+    """使用 Supabase 混合檢索（Vector + FTS + RRF 融合評分）"""
     if not supabase:
+        logger.warning("Supabase is not initialized. RAG skipped.")
         return []
     try:
-        # 1. 撈取該公司所有啟用的知識條目
-        res = (
-            supabase.table('knowledge_base')
-            .select('title, content')
-            .eq('company_id', company_id)
-            .eq('is_active', True)
-            .execute()
-        )
-        all_docs = res.data or []
-        if not all_docs:
+        # 1. 生成 query embedding
+        query_embedding = get_embedding(query)
+        if not query_embedding:
+            logger.warning("Failed to generate query embedding, returning empty search results.")
             return []
             
-        # 2. 清理查詢語句並做中文字元分詞
-        import re
-        clean_query = re.sub(r'[^\w\s]', '', query)
-        stop_words = {
-            "的", "了", "和", "是", "就", "都", "而", "及", "與", "或", "在", "以", "等", "之",
-            "嗎", "呢", "啊", "吧", "呀", "啦", "哈", "唷", "呢", "的", "那", "這個", "那個",
-            "請問", "有", "沒有", "有哪些", "是什麼", "如何", "怎麼", "請客", "客服", "助理",
-            "你可以", "我想", "我要", "如何申請", "申請", "介紹", "說明"
-        }
+        # 2. 呼叫 supabase RPC "match_knowledge_hybrid"
+        # 參數: query_embedding, query_text, match_count, company_filter
+        res = supabase.rpc(
+            'match_knowledge_hybrid',
+            {
+                'query_embedding': query_embedding,
+                'query_text': query,
+                'match_count': limit,
+                'company_filter': company_id
+            }
+        ).execute()
         
-        query_chars = [c for c in clean_query if c.strip() and c not in stop_words]
-        if not query_chars:
-            query_chars = [c for c in query if c.strip()]
-            
-        # 3. 計算重疊度評分
-        scored_docs = []
-        for doc in all_docs:
-            title = doc.get('title', '') or ''
-            content = doc.get('content', '') or ''
-            score = 0
-            
-            # N-grams 雙字匹配（權重最高）
-            ngrams = []
-            for i in range(len(query_chars) - 1):
-                ngrams.append("".join(query_chars[i:i+2]))
-                
-            for ngram in ngrams:
-                if ngram in title:
-                    score += 10
-                if ngram in content:
-                    score += 5
-                    
-            # 單字元匹配（基礎權重）
-            for char in query_chars:
-                if char in title:
-                    score += 2
-                if char in content:
-                    score += 1
-                    
-            # 只有分數大於等於 5 分，才視為相關
-            if score >= 5:
-                scored_docs.append((score, doc))
-                
-        # 4. 排序並回傳
-        scored_docs.sort(key=lambda x: x[0], reverse=True)
-        return [doc for score, doc in scored_docs[:limit]]
+        docs = res.data or []
+        logger.info(f"Hybrid RAG search found {len(docs)} documents.")
+        return [{'title': doc.get('title', ''), 'content': doc.get('content', '')} for doc in docs]
         
     except Exception as e:
-        logger.warning({"msg": "knowledge search failed", "error": str(e)})
+        logger.error({"msg": "knowledge hybrid search failed", "error": str(e)})
         return []
+
+
 
 
 def get_history(company_id: str, user_id: str, rounds: int = 5) -> list[dict]:
@@ -665,6 +655,21 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
     import time
     start_time = time.time()
     
+    # ── 顯示輸入中動畫 ──
+    # Note: LINE Bot accounts do NOT show read receipts to users (platform limitation).
+    # show_loading_animation only shows a typing indicator bubble, not a read receipt.
+    # We use 60 seconds (the max) to ensure the animation covers even slow LLM responses.
+    # The animation is automatically cleared when a message is sent to the user.
+    try:
+        if company.get('line_access_token') and user_id:
+            config = Configuration(access_token=company['line_access_token'])
+            with ApiClient(config) as api_client:
+                MessagingApi(api_client).show_loading_animation(
+                    ShowLoadingAnimationRequest(chat_id=user_id, loading_seconds=60)
+                )
+    except Exception as le:
+        logger.warning("Failed to show loading animation: %s", str(le))
+    
     # ── 攔截 AI 生圖與生片指令 ──
     msg_lower = user_message.lower().strip()
     if msg_lower.startswith("/draw ") or msg_lower.startswith("/畫圖 "):
@@ -892,9 +897,15 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
         "}\n"
         "[/FLEX_CARD]\n"
         "```\n"
-        "5. 回覆時，除了 [FLEX_CARD] 標籤內部，外部文字嚴禁保留任何 markdown 符號（如 ** 或 #），請保持排版乾淨、語氣溫和。"
+        "5. 回覆時，除了 [FLEX_CARD] 標籤內部，外部文字嚴禁保留任何 markdown 符號（如 ** 或 #），請保持排版乾淨、語氣溫和。\n"
+        "6. 【嚴格禁止直接輸出文件清單或條列規定】：\n"
+        "   當用戶詢問的是某個「福利項目名稱」（如「嬰幼兒福利」、「育兒津貼」、「補助項目」等），\n"
+        "   **絕對禁止**在第一層回覆中直接貼出文件清單或一長串條列規定。\n"
+        "   正確做法：先用 1 句話說明該福利「是什麼」，再用 [FLEX_CARD] 提供 [詳細說明 / 申請資格 / 所需文件 / 補助金額] 等按鈕讓用戶主動選擇深度，\n"
+        "   只有當用戶明確點擊「應備文件」或「所需文件」後，才可以列出文件清單。"
     )
     system_prompt += style_instruction
+
 
     # 4. 組合 messages
     messages = [{"role": "system", "content": system_prompt}]
@@ -941,9 +952,193 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
     save_messages(company['id'], user_id, user_message, clean_reply)
 
     # 7. 回覆 LINE
+    # Always use Push Message (force_push=True) for RAG replies:
+    # - handle_text_event runs in a background thread, reply_token expires in ~5 seconds.
+    # - RAG + LLM typically takes 3-10+ seconds, making Reply Token almost always expired.
+    # - Switching from Reply to Push mid-response causes a noticeable delay and may leave
+    #   the loading animation stuck. Push Message is reliable and consistent.
     config = Configuration(access_token=company['line_access_token'])
     with ApiClient(config) as api_client:
-        reply_with_flex_or_text(api_client, reply_token, company.get('name', 'AI 客服助理'), ai_reply, logo_url=company.get('logo_url'), user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
+        reply_with_flex_or_text(api_client, reply_token, company.get('name', 'AI 客服助理'), ai_reply, logo_url=company.get('logo_url'), user_id=user_id, force_push=True)
+
+
+def handle_quick_summary_postback(company: dict, user_id: str, query_text: str):
+    """
+    方案 B+C：針對圖文選單 Postback 的快速摘要回應模式。
+
+    不跑 LLM（省去 3~10 秒等待），直接:
+    1. 用 RAG 搜尋出最相關的 1~3 筆知識庫條目
+    2. 從第一筆條目取出前 80 字作為即時摘要
+    3. 組裝成 Flex 摘要卡片 + 最多 3 個引導按鈕 Push 給用戶
+
+    用戶點按鈕後才觸發完整 LLM 詳細回答 (handle_text_event)。
+    整體回應時間 < 1.5 秒。
+    """
+    import requests as req_lib
+
+    docs = search_knowledge(company['id'], query_text, limit=4)
+
+    config = Configuration(access_token=company['line_access_token'])
+    with ApiClient(config) as api_client:
+        api = MessagingApi(api_client)
+
+        if not docs:
+            # 知識庫無資料，fallback 到完整 LLM 流程
+            logger.info("Quick summary: no RAG docs found, falling back to LLM for: %s", query_text)
+            handle_text_event(company, user_id, None, query_text)
+            return
+
+        # ── 組裝摘要卡 ──
+        primary = docs[0]
+        topic_title = primary['title']
+
+        # 從第一條取前 90 字當摘要；若有多筆，列出標題作為子項目
+        summary_text = primary['content'][:90].rstrip() + '…'
+
+        # 衍生的引導按鈕（從各筆 docs 標題推導）
+        # 按鈕 1：讓用戶選「詳細說明」
+        # 按鈕 2：讓用戶選「申請資格 / 所需文件」（依關鍵字判斷）
+        # 按鈕 3 (若有第二筆)：以第二筆標題作為延伸問答入口
+        buttons = []
+
+        detail_label = "📋 查看詳細說明"
+        detail_text = f"{query_text} 詳細說明"
+        buttons.append({"label": detail_label, "text": detail_text})
+
+        # 推導常見的「文件 / 資格 / 補助」衍生按鈕
+        content_lower = primary['content'].lower()
+        combined_content = " ".join(d['content'] for d in docs)
+        has_docs = any(kw in combined_content for kw in ['文件', '戶籍謄本', '證明', '身分證', '申請書'])
+        has_qualifications = any(kw in combined_content for kw in ['資格', '條件', '符合', '標準', '門檻'])
+        has_amount = any(kw in combined_content for kw in ['金額', '補助', '元', '津貼', '費用'])
+
+        if has_qualifications:
+            buttons.append({"label": "✅ 申請資格", "text": f"{query_text} 申請資格"})
+        if has_docs and len(buttons) < 3:
+            buttons.append({"label": "📄 應備文件", "text": f"{query_text} 應備文件"})
+        if has_amount and len(buttons) < 3:
+            buttons.append({"label": "💰 補助金額", "text": f"{query_text} 補助金額"})
+
+        # 若衍生按鈕不足，加上第二筆知識庫條目的標題作為探索入口
+        if len(docs) >= 2 and len(buttons) < 3:
+            second_title = docs[1]['title']
+            if second_title != topic_title:
+                buttons.append({"label": f"🔍 {second_title[:10]}", "text": second_title})
+
+        # LINE Flex Card 限制：按鈕最多 3 個
+        buttons = buttons[:3]
+
+        # 組裝 Flex JSON
+        footer_btns = []
+        for btn in buttons:
+            footer_btns.append({
+                "type": "button",
+                "style": "primary",
+                "color": "#4F46E5",
+                "height": "sm",
+                "margin": "xs",
+                "action": {
+                    "type": "message",
+                    "label": btn["label"],
+                    "text": btn["text"]
+                }
+            })
+
+        bubble = {
+            "type": "bubble",
+            "header": {
+                "type": "box",
+                "layout": "vertical",
+                "backgroundColor": "#4F46E5",
+                "paddingAll": "md",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": topic_title,
+                        "color": "#FFFFFF",
+                        "weight": "bold",
+                        "size": "md",
+                        "wrap": True
+                    }
+                ]
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "lg",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": summary_text,
+                        "wrap": True,
+                        "size": "sm",
+                        "color": "#374151"
+                    }
+                ]
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "xs",
+                "paddingAll": "md",
+                "contents": footer_btns if footer_btns else [
+                    {
+                        "type": "text",
+                        "text": "💡 請點擊上方按鈕或直接輸入問題",
+                        "size": "xxs",
+                        "color": "#9CA3AF",
+                        "align": "center"
+                    }
+                ]
+            }
+        }
+
+        flex_container = FlexContainer.from_json(json.dumps(bubble))
+        flex_msg = FlexMessage(alt_text=f"📋 {topic_title} 快速摘要", contents=flex_container)
+
+        try:
+            api.push_message_with_http_info(
+                PushMessageRequest(to=user_id, messages=[flex_msg])
+            )
+            logger.info("Quick summary card sent for query: %s", query_text)
+        except Exception as e:
+            logger.error("Failed to send quick summary card: %s", str(e))
+            # Fallback 到完整 LLM 流程
+            handle_text_event(company, user_id, None, query_text)
+
+
+def handle_postback_event(company: dict, user_id: str, reply_token: str, postback_data: str):
+    """處理 LINE Postback 事件（圖文選單連動智慧客服）"""
+    import urllib.parse
+    logger.info(f"Received Postback data: {postback_data} for user: {user_id}")
+    
+    try:
+        # 解析 query string 格式 (例如 action=rag_query&text=老莫介紹)
+        params = urllib.parse.parse_qs(postback_data)
+        action = params.get('action', [''])[0]
+    except Exception:
+        action = ''
+        
+    # 圖文選單觸發的 RAG 查詢 → 走快速摘要模式 (方案 B+C)
+    # 只有在用戶主動在聊天室輸入文字時才跑完整 LLM 流程
+    if action == 'rag_query':
+        query_text = params.get('text', [''])[0]
+        if query_text:
+            logger.info("Quick summary postback for: '%s'", query_text)
+            handle_quick_summary_postback(company, user_id, query_text)
+            return
+            
+    # 備用連動：若不含特定的 action，但 data 整串是有意義的非空文字
+    if postback_data and not action:
+        logger.info("Quick summary via raw postback data: '%s'", postback_data)
+        handle_quick_summary_postback(company, user_id, postback_data)
+        return
+        
+    # 其他未定義 postback 動作的預設回覆
+    reply_text(company, reply_token, "已收到選單按鈕指令。", user_id=user_id)
+
+
+
 # ============================================
 # 路由：多租戶 Webhook 入口（單一路由，乾淨正確）
 # ============================================
@@ -977,16 +1172,27 @@ def callback(company_slug: str):
     import threading
     events = json.loads(body).get('events', [])
     for event in events:
-        if event.get('type') != 'message':
-            continue
-        if event.get('message', {}).get('type') != 'text':
+        user_id = event.get('source', {}).get('userId')
+        reply_token = event.get('replyToken')
+        if not user_id or not reply_token:
             continue
 
-        threading.Thread(
-            target=handle_text_event,
-            args=(company, event['source']['userId'], event['replyToken'], event['message']['text']),
-            daemon=True
-        ).start()
+        # 處理文字訊息
+        if event.get('type') == 'message' and event.get('message', {}).get('type') == 'text':
+            threading.Thread(
+                target=handle_text_event,
+                args=(company, user_id, reply_token, event['message']['text']),
+                daemon=True
+            ).start()
+            
+        # 處理 Postback 事件（支援圖文選單按鈕連動）
+        elif event.get('type') == 'postback':
+            postback_data = event.get('postback', {}).get('data', '')
+            threading.Thread(
+                target=handle_postback_event,
+                args=(company, user_id, reply_token, postback_data),
+                daemon=True
+            ).start()
 
     return 'OK'
 

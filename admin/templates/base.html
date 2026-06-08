@@ -34,6 +34,9 @@
         <a href="{{ url_for('knowledge') }}" class="nav-item {% if 'knowledge' in request.endpoint %}active{% endif %}">
           <span class="nav-icon">🧠</span> 知識庫訓練
         </a>
+        <a href="{{ url_for('rich_menu') }}" class="nav-item {% if 'rich_menu' in request.endpoint %}active{% endif %}">
+          <span class="nav-icon">🖼️</span> 圖文選單
+        </a>
         <a href="{{ url_for('chat_history_view') }}" class="nav-item {% if 'chat_history_view' in request.endpoint %}active{% endif %}">
           <span class="nav-icon">💬</span> 對話紀錄
         </a>

@@ -9,27 +9,33 @@ Analyze/count/filter/compare/search/parse/transform data: **write code** via `mc
 ## BLOCKED — do NOT use
 
 ### curl / wget — FORBIDDEN
+
 Do NOT use `curl`/`wget` via `run_command`. Dumps raw HTTP into context.
 Use: `mcp__context-mode__ctx_fetch_and_index(url, source)` or `mcp__context-mode__ctx_execute(language: "javascript", code: "const r = await fetch(...)")`
 
 ### Inline HTTP — FORBIDDEN
+
 No `node -e "fetch(..."`, `python -c "requests.get(..."` via `run_command`. Bypasses sandbox.
 Use: `mcp__context-mode__ctx_execute(language, code)` — only stdout enters context
 
 ### Direct web fetching — FORBIDDEN
+
 No `read_url_content` for large pages. Raw HTML can exceed 100 KB.
 Use: `mcp__context-mode__ctx_fetch_and_index(url, source)` then `mcp__context-mode__ctx_search(queries)`
 
 ## REDIRECTED — use sandbox
 
 ### Shell (>20 lines output)
+
 `run_command` ONLY for: `git`, `mkdir`, `rm`, `mv`, `cd`, `ls`, `npm install`, `pip install`.
 Otherwise: `mcp__context-mode__ctx_batch_execute(commands, queries)` or `mcp__context-mode__ctx_execute(language: "shell", code: "...")`
 
 ### File reading (for analysis)
+
 Reading to **edit** → `view_file`/`replace_file_content` correct. Reading to **analyze/explore/summarize** → `mcp__context-mode__ctx_execute_file(path, language, code)`.
 
 ### Search (large results)
+
 Use `mcp__context-mode__ctx_execute(language: "shell", code: "grep ...")` in sandbox.
 
 ## Tool selection
@@ -58,18 +64,19 @@ Descriptive source labels for `search(source: "label")`.
 
 ## ctx commands
 
-| Command | Action |
-|---------|--------|
-| `ctx stats` | Call `stats` MCP tool, display full output verbatim |
-| `ctx doctor` | Call `doctor` MCP tool, run returned shell command, display as checklist |
-| `ctx upgrade` | Call `upgrade` MCP tool, run returned shell command, display as checklist |
-| `ctx purge` | Call `purge` MCP tool with confirm: true. Warns before wiping knowledge base. |
+| Command       | Action                                                                        |
+| ------------- | ----------------------------------------------------------------------------- |
+| `ctx stats`   | Call `stats` MCP tool, display full output verbatim                           |
+| `ctx doctor`  | Call `doctor` MCP tool, run returned shell command, display as checklist      |
+| `ctx upgrade` | Call `upgrade` MCP tool, run returned shell command, display as checklist     |
+| `ctx purge`   | Call `purge` MCP tool with confirm: true. Warns before wiping knowledge base. |
 
 After /clear or /compact: knowledge base and session stats preserved. Use `ctx purge` to start fresh.
 
 ## Secretary Mode — Document & Design
 
 - **Writing**: Draft in Markdown → convert via pandoc/LibreOffice to target format
+- **Language**: 所有產出的文件（包括 `implementation_plan.md`、`task.md`、`walkthrough.md` 等 artifact 檔案）一律使用繁體中文（台灣）。
 - **Design**: Use `generate_image` for mockups, diagrams, social media assets
 - **System Tools**: Scripts in JavaScript/Python/Shell, keep in `output/tools/`
 - **Output**: Deliver files to `~/文件/output/{documents,designs,tools}/`

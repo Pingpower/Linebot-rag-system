@@ -3,6 +3,9 @@
 -- 請到 Supabase Dashboard > SQL Editor 執行此檔案
 -- ============================================
 
+-- 啟用 vector 擴充功能
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- 1. 公司設定表
 CREATE TABLE IF NOT EXISTS companies (
     id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -15,13 +18,14 @@ CREATE TABLE IF NOT EXISTS companies (
     created_at  timestamptz DEFAULT now()
 );
 
--- 2. 知識庫表（支援全文搜尋）
+-- 2. 知識庫表（支援全文搜尋與向量檢索）
 CREATE TABLE IF NOT EXISTS knowledge_base (
     id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     company_id  uuid NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
     title       text NOT NULL,                  -- 知識標題，如「退貨政策」
     content     text NOT NULL,                  -- 詳細內容
     tags        text[],                         -- 標籤，方便分類
+    embedding   vector(3072),                   -- 3072 維度向量 (用於 Gemini Embedding)
     is_active   boolean DEFAULT true,
     created_at  timestamptz DEFAULT now(),
     updated_at  timestamptz DEFAULT now()
@@ -64,13 +68,86 @@ CREATE POLICY "service_role_all" ON chat_history
     FOR ALL USING (auth.role() = 'service_role');
 
 -- ============================================
--- 範例資料（測試用，執行後可刪除）
+-- 向量搜尋 RPC 函數
 -- ============================================
--- INSERT INTO companies (slug, name, line_channel_secret, line_access_token, system_prompt)
--- VALUES (
---     'demo-company',
---     '示範公司',
---     'your_channel_secret_here',
---     'your_access_token_here',
---     '你是示範公司的專屬客服，請根據公司資料回答問題。'
--- );
+CREATE OR REPLACE FUNCTION match_knowledge (
+  query_embedding vector(3072),
+  match_threshold float,
+  match_count int,
+  company_filter uuid
+)
+RETURNS TABLE (
+  id uuid,
+  title text,
+  content text,
+  similarity float
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT
+    kb.id,
+    kb.title,
+    kb.content,
+    1 - (kb.embedding <=> query_embedding) AS similarity
+  FROM knowledge_base kb
+  WHERE kb.is_active = true
+    AND kb.company_id = company_filter
+    AND 1 - (kb.embedding <=> query_embedding) > match_threshold
+  ORDER BY kb.embedding <=> query_embedding
+  LIMIT match_count;
+END;
+$$;
+
+
+CREATE OR REPLACE FUNCTION match_knowledge_hybrid (
+  query_embedding vector(3072),
+  query_text text,
+  match_count int,
+  company_filter uuid
+)
+RETURNS TABLE (
+  id uuid,
+  title text,
+  content text,
+  similarity float
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN QUERY
+  WITH vector_matches AS (
+    SELECT
+      kb.id,
+      ROW_NUMBER() OVER (ORDER BY kb.embedding <=> query_embedding) as rank
+    FROM knowledge_base kb
+    WHERE kb.is_active = true
+      AND kb.company_id = company_filter
+    LIMIT match_count * 2
+  ),
+  fts_matches AS (
+    SELECT
+      kb.id,
+      ROW_NUMBER() OVER (ORDER BY ts_rank_cd(to_tsvector('simple', kb.title || ' ' || kb.content), plainto_tsquery('simple', query_text)) DESC) as rank
+    FROM knowledge_base kb
+    WHERE kb.is_active = true
+      AND kb.company_id = company_filter
+      AND to_tsvector('simple', kb.title || ' ' || kb.content) @@ plainto_tsquery('simple', query_text)
+    LIMIT match_count * 2
+  )
+  SELECT
+    kb.id,
+    kb.title,
+    kb.content,
+    (COALESCE(1.0 / (60 + vm.rank), 0.0) + COALESCE(1.0 / (60 + fm.rank), 0.0))::float AS similarity
+  FROM knowledge_base kb
+  LEFT JOIN vector_matches vm ON kb.id = vm.id
+  LEFT JOIN fts_matches fm ON kb.id = fm.id
+  WHERE (vm.id IS NOT NULL OR fm.id IS NOT NULL)
+  ORDER BY similarity DESC
+  LIMIT match_count;
+END;
+$$;
+
+

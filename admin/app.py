@@ -24,6 +24,12 @@ try:
 except ImportError:
     DDG_OK = False
 
+from linebot.v3.messaging import (
+    Configuration, ApiClient, MessagingApi, MessagingApiBlob,
+    RichMenuRequest, RichMenuSize, RichMenuArea, RichMenuBounds,
+    MessageAction, PostbackAction, URIAction
+)
+
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '../line_bot/.env'))
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -515,6 +521,271 @@ def company_toggle(company_id):
     company = get_company(company_id)
     sb.table('companies').update({'is_active': not company['is_active']}).eq('id', company_id).execute()
     return jsonify({'ok': True, 'is_active': not company['is_active']})
+
+
+# ── LINE Rich Menu Management ──────────────────────────────────────────────────
+
+@app.route('/rich_menu')
+@login_required
+def rich_menu():
+    companies = get_companies()
+    selected_id = request.args.get('company_id')
+    
+    # Auto redirect to the first company if not specified
+    if not selected_id and companies:
+        return redirect(url_for('rich_menu', company_id=companies[0]['id']))
+        
+    selected = None
+    menus = []
+    if selected_id:
+        selected = get_company(selected_id)
+        # Fetch rich menus for this company
+        r = sb.table('company_rich_menus').select('*').eq('company_id', selected_id).order('created_at', desc=True).execute()
+        menus = r.data or []
+        
+    return render_template('rich_menu.html', companies=companies, selected=selected, menus=menus)
+
+
+@app.route('/companies/<company_id>/richmenu/upload', methods=['POST'])
+@login_required
+def rich_menu_upload(company_id):
+    company = get_company(company_id)
+    if not company:
+        return jsonify({'error': 'Company not found'}), 404
+        
+    token = company.get('line_access_token')
+    if not token:
+        return jsonify({'error': 'LINE Access Token not configured for this company'}), 400
+        
+    name = request.form.get('name', '').strip()
+    chat_bar_text = request.form.get('chat_bar_text', '').strip()
+    width_val = request.form.get('width', type=int)
+    height_val = request.form.get('height', type=int)
+    areas_json = request.form.get('areas', '[]')
+    
+    image_file = request.files.get('image')
+    if not image_file:
+        return jsonify({'error': 'No image file uploaded'}), 400
+        
+    if not name or not chat_bar_text or not width_val or not height_val:
+        return jsonify({'error': 'Missing required fields'}), 400
+
+    if width_val != 1200 or height_val != 810:
+        return jsonify({'error': '圖片尺寸不符合規範。本系統強制限制寬度必須為 1200px，高度必須為 810px。'}), 400
+
+    img_bytes = image_file.read()
+    if len(img_bytes) > 1 * 1024 * 1024:
+        return jsonify({'error': 'Image size exceeds 1MB limit'}), 400
+        
+    image_file.seek(0)
+    
+    # Verify physical image dimensions using PIL to prevent bypass
+    try:
+        from PIL import Image
+        import io
+        img = Image.open(io.BytesIO(img_bytes))
+        w, h = img.size
+        if w != 1200 or h != 810:
+            return jsonify({'error': f'上傳的圖片實際尺寸為 {w}x{h}px，不符合系統要求的 1200x810px 限制。'}), 400
+    except Exception as e:
+        logger.warning("Failed to validate uploaded image dimensions: %s", str(e))
+        return jsonify({'error': '圖片格式有誤或無法解析實際尺寸。'}), 400
+
+    try:
+        areas_data = json.loads(areas_json)
+    except Exception as e:
+        logger.warning("Invalid areas JSON format: %s", str(e))
+        return jsonify({'error': f'Invalid areas JSON format: {str(e)}'}), 400
+
+    try:
+        # 1. Initialize LINE API client
+        config = Configuration(access_token=token)
+        api_client = ApiClient(config)
+        messaging_api = MessagingApi(api_client)
+        messaging_api_blob = MessagingApiBlob(api_client)
+        
+        # 2. Build RichMenuArea list
+        areas_objects = []
+        for idx, a in enumerate(areas_data):
+            bounds = RichMenuBounds(
+                x=int(a['bounds']['x']),
+                y=int(a['bounds']['y']),
+                width=int(a['bounds']['width']),
+                height=int(a['bounds']['height'])
+            )
+            act_type = a['action']['type']
+            label = a['action'].get('label', f'Action {idx+1}')
+            if label and len(label) > 20:
+                label = label[:20]
+                
+            if act_type == 'message':
+                act = MessageAction(text=a['action']['text'], label=label)
+            elif act_type == 'postback':
+                act = PostbackAction(
+                    data=a['action']['data'],
+                    text=a['action'].get('text'),
+                    label=label
+                )
+            elif act_type == 'uri':
+                act = URIAction(uri=a['action']['uri'], label=label)
+            else:
+                return jsonify({'error': f'Unsupported action type: {act_type}'}), 400
+                
+            areas_objects.append(RichMenuArea(bounds=bounds, action=act))
+            
+        rich_menu_request = RichMenuRequest(
+            size=RichMenuSize(width=width_val, height=height_val),
+            selected=False,
+            name=name,
+            chat_bar_text=chat_bar_text,
+            areas=areas_objects
+        )
+        
+        # 3. Create Rich Menu on LINE
+        res = messaging_api.create_rich_menu(rich_menu_request)
+        rich_menu_id = res.rich_menu_id
+        
+        # 4. Upload Image to LINE
+        messaging_api_blob.set_rich_menu_image(
+            rich_menu_id=rich_menu_id,
+            body=img_bytes,
+            headers={'Content-Type': image_file.content_type}
+        )
+        
+        # 5. Save image locally for dashboard view
+        upload_dir = os.path.join(app.root_path, 'static', 'uploads')
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        ext = 'png'
+        if 'jpeg' in image_file.content_type or 'jpg' in image_file.content_type:
+            ext = 'jpg'
+        local_filename = f"rich_menu_{rich_menu_id}.{ext}"
+        local_filepath = os.path.join(upload_dir, local_filename)
+        
+        with open(local_filepath, 'wb') as f:
+            f.write(img_bytes)
+            
+        image_url = f"/static/uploads/{local_filename}"
+        
+        # 6. Record to database
+        sb.table('company_rich_menus').insert({
+            'company_id': company_id,
+            'rich_menu_id': rich_menu_id,
+            'name': name,
+            'chat_bar_text': chat_bar_text,
+            'image_url': image_url,
+            'areas': areas_data,
+            'is_active': False
+        }).execute()
+        
+        logger.info("Created Rich Menu %s for company %s", rich_menu_id, company_id)
+        return jsonify({'success': True, 'rich_menu_id': rich_menu_id})
+        
+    except Exception as e:
+        logger.exception("Failed to create rich menu")
+        return jsonify({'error': f"LINE API error: {str(e)}"}), 500
+
+
+@app.route('/companies/<company_id>/richmenu/<rich_menu_id>/activate', methods=['POST'])
+@login_required
+def rich_menu_activate(company_id, rich_menu_id):
+    company = get_company(company_id)
+    if not company:
+        return jsonify({'error': 'Company not found'}), 404
+        
+    token = company.get('line_access_token')
+    if not token:
+        return jsonify({'error': 'LINE Access Token not configured'}), 400
+        
+    try:
+        config = Configuration(access_token=token)
+        api_client = ApiClient(config)
+        messaging_api = MessagingApi(api_client)
+        
+        # Set default rich menu for LINE official account
+        messaging_api.set_default_rich_menu(rich_menu_id)
+        
+        # Update is_active statuses in DB
+        sb.table('company_rich_menus').update({'is_active': False}).eq('company_id', company_id).execute()
+        sb.table('company_rich_menus').update({'is_active': True}).eq('rich_menu_id', rich_menu_id).execute()
+        
+        logger.info("Activated Rich Menu %s as default for company %s", rich_menu_id, company_id)
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.exception("Failed to activate rich menu")
+        return jsonify({'error': f"LINE API error: {str(e)}"}), 500
+
+
+@app.route('/companies/<company_id>/richmenu/deactivate', methods=['POST'])
+@login_required
+def rich_menu_deactivate(company_id):
+    company = get_company(company_id)
+    if not company:
+        return jsonify({'error': 'Company not found'}), 404
+        
+    token = company.get('line_access_token')
+    if not token:
+        return jsonify({'error': 'LINE Access Token not configured'}), 400
+        
+    try:
+        config = Configuration(access_token=token)
+        api_client = ApiClient(config)
+        messaging_api = MessagingApi(api_client)
+        
+        # Cancel default rich menu
+        messaging_api.cancel_default_rich_menu()
+        
+        # Update DB status
+        sb.table('company_rich_menus').update({'is_active': False}).eq('company_id', company_id).execute()
+        
+        logger.info("Deactivated default Rich Menu for company %s", company_id)
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.exception("Failed to deactivate rich menu")
+        return jsonify({'error': f"LINE API error: {str(e)}"}), 500
+
+
+@app.route('/companies/<company_id>/richmenu/<rich_menu_id>/delete', methods=['POST'])
+@login_required
+def rich_menu_delete(company_id, rich_menu_id):
+    company = get_company(company_id)
+    if not company:
+        return jsonify({'error': 'Company not found'}), 404
+        
+    token = company.get('line_access_token')
+    if not token:
+        return jsonify({'error': 'LINE Access Token not configured'}), 400
+        
+    try:
+        config = Configuration(access_token=token)
+        api_client = ApiClient(config)
+        messaging_api = MessagingApi(api_client)
+        
+        # Delete from LINE
+        try:
+            messaging_api.delete_rich_menu(rich_menu_id)
+        except Exception as api_err:
+            logger.warning("Failed to delete Rich Menu %s from LINE: %s", rich_menu_id, str(api_err))
+            
+        # Clean local cache file
+        r = sb.table('company_rich_menus').select('image_url').eq('rich_menu_id', rich_menu_id).single().execute()
+        if r.data and r.data.get('image_url'):
+            local_filename = os.path.basename(r.data['image_url'])
+            local_filepath = os.path.join(app.root_path, 'static', 'uploads', local_filename)
+            if os.path.exists(local_filepath):
+                try:
+                    os.remove(local_filepath)
+                except Exception as file_err:
+                    logger.warning("Failed to remove local file %s: %s", local_filepath, str(file_err))
+                    
+        # Delete from database
+        sb.table('company_rich_menus').delete().eq('rich_menu_id', rich_menu_id).execute()
+        
+        logger.info("Deleted Rich Menu %s for company %s", rich_menu_id, company_id)
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.exception("Failed to delete rich menu")
+        return jsonify({'error': f"Failed to delete: {str(e)}"}), 500
 
 
 # ── Chat History (對話紀錄) ──────────────────────────────────────────────────
@@ -1023,11 +1294,11 @@ def _fallback_extract(content: str) -> list[dict]:
 
 def _llm_extract(raw_text: str, hint: str = '') -> list[dict]:
     """呼叫配置的 LLM (本地/Gemini/NVIDIA NIM/OpenRouter)，從原始文字萃取知識條目 JSON"""
-    prompt = f"""你是知識庫整理助手。請從以下文字中萃取出 2-3 個清晰的知識條目。
+    prompt = f"""你是知識庫整理助手。請從以下文字中萃取出所有重要且清晰的知識條目（如果是商品、服務或 FAQ 介紹，請將每款商品或每個問答獨立建立一條條目，總數在 2-8 個之間）。
 {f'重點提示：{hint}' if hint else ''}
 
 【原始文字】
-{raw_text[:2000]}
+{raw_text[:16000]}
 
 【極重要指令】
 請直接且僅回傳 JSON 陣列，直接以 [ 開頭並以 ] 結尾。格式如下：
@@ -1041,90 +1312,153 @@ def _llm_extract(raw_text: str, hint: str = '') -> list[dict]:
 2. 請直接輸出 JSON 陣列，不要加入任何解釋文字或 Markdown 外殼包裝。"""
 
     provider = os.getenv('KNOWLEDGE_LLM_PROVIDER', 'local').lower().strip()
-    headers = {'Content-Type': 'application/json'}
-
-    if provider == 'gemini':
-        api_key = os.getenv('GEMINI_API_KEY', '').strip()
-        if not api_key:
-            raise ValueError("設定了 Gemini 供應商，但在環境變數 (.env) 中未設定有效的 GEMINI_API_KEY")
-        model = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash').strip()
-        url = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
-        headers['Authorization'] = f'Bearer {api_key}'
-
-    elif provider == 'nvidia':
-        api_key = os.getenv('NVIDIA_NIM_API_KEY', '').strip()
-        if not api_key:
-            raise ValueError("設定了 NVIDIA NIM 供應商，但在環境變數 (.env) 中未設定有效的 NVIDIA_NIM_API_KEY")
-        model = os.getenv('NVIDIA_NIM_MODEL', 'meta/llama-3.1-405b-instruct').strip()
-        url = 'https://integrate.api.nvidia.com/v1/chat/completions'
-        headers['Authorization'] = f'Bearer {api_key}'
-
-    elif provider == 'openrouter':
-        api_key = os.getenv('OPENROUTER_API_KEY', '').strip()
-        if not api_key:
-            raise ValueError("設定了 OpenRouter 供應商，但在環境變數 (.env) 中未設定有效的 OPENROUTER_API_KEY")
-        model = os.getenv('OPENROUTER_MODEL', 'google/gemini-2.5-flash').strip()
-        url = 'https://openrouter.ai/api/v1/chat/completions'
-        headers['Authorization'] = f'Bearer {api_key}'
-        headers['HTTP-Referer'] = 'https://github.com/Pingpower/-linebot-rag-system'
-        headers['X-Title'] = 'Linebot RAG System'
-
-    else:
-        # local / default
-        model = 'local'
-        url = f'{LLAMA_URL}/v1/chat/completions'
-
-    payload = {
-        'model': model,
-        'messages': [{'role': 'user', 'content': prompt}],
-        'temperature': 0.2,
-        'max_tokens': 1200,
-        'stream': False,
-    }
-
-    logger.info(f"Extracting knowledge using LLM Provider: {provider} (model: {model})")
-    resp = req_lib.post(url, json=payload, headers=headers, timeout=300)
-    resp.raise_for_status()
-    raw_content = resp.json()['choices'][0]['message']['content'].strip()
-
-    content = raw_content
-    # 1. 移除 <think>...</think> 區塊 (推理模型會強制輸出)
-    content = re.sub(r'<think>[\s\S]*?(</think>|$)', '', content).strip()
     
-    # 2. 移除 markdown 語法外殼 (如 ```json ... ```)
-    content = re.sub(r'```json\s*', '', content)
-    content = re.sub(r'```\s*', '', content)
-    content = content.strip()
+    def do_request(prov):
+        headers = {'Content-Type': 'application/json'}
+        if prov == 'gemini':
+            api_key = os.getenv('GEMINI_API_KEY', '').strip()
+            if not api_key:
+                raise ValueError("GEMINI_API_KEY is missing")
+            model = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash').strip()
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            
+            payload = {
+                'contents': [{'parts': [{'text': prompt}]}],
+                'generationConfig': {
+                    'temperature': 0.2,
+                    'maxOutputTokens': 4000,
+                }
+            }
+        else:
+            if prov == 'nvidia':
+                api_key = os.getenv('NVIDIA_NIM_API_KEY', '').strip()
+                if not api_key:
+                    raise ValueError("NVIDIA_NIM_API_KEY is missing")
+                model = os.getenv('NVIDIA_NIM_MODEL', 'meta/llama-3.1-405b-instruct').strip()
+                url = 'https://integrate.api.nvidia.com/v1/chat/completions'
+                headers['Authorization'] = f'Bearer {api_key}'
+            elif prov == 'openrouter':
+                api_key = os.getenv('OPENROUTER_API_KEY', '').strip()
+                if not api_key:
+                    raise ValueError("OPENROUTER_API_KEY is missing")
+                model = os.getenv('OPENROUTER_MODEL', 'google/gemini-2.5-flash').strip()
+                url = 'https://openrouter.ai/api/v1/chat/completions'
+                headers['Authorization'] = f'Bearer {api_key}'
+                headers['HTTP-Referer'] = 'https://github.com/Pingpower/-linebot-rag-system'
+                headers['X-Title'] = 'Linebot RAG System'
+            else:
+                model = 'local'
+                url = f'{LLAMA_URL}/v1/chat/completions'
 
-    # 3. 擷取第一個 [ 到最後一個 ] 之間的內容
-    start = content.find('[')
-    end = content.rfind(']')
-    if start != -1 and end != -1 and end > start:
-        content = content[start:end+1]
-    
-    # 4. 清理結尾多餘逗號
-    content = re.sub(r',\s*\]', ']', content)
-    content = re.sub(r',\s*\}', '}', content)
+            payload = {
+                'model': model,
+                'messages': [{'role': 'user', 'content': prompt}],
+                'temperature': 0.2,
+                'max_tokens': 4000,
+                'stream': False,
+            }
+
+        # Retry logic for handling temporary 503/429 errors from LLM APIs
+        import time
+        max_retries = 4
+        retry_delay = 2.0  # initial delay in seconds
+        resp = None
+
+        for attempt in range(max_retries):
+            try:
+                logger.info("Extracting knowledge using LLM Provider: %s (model: %s) [Attempt %d/%d]", 
+                            prov, model if prov == 'gemini' else payload.get('model'), attempt + 1, max_retries)
+                resp = req_lib.post(url, json=payload, headers=headers, timeout=120)
+                resp.raise_for_status()
+                break  # Success, exit retry loop
+            except Exception as e:
+                # Determine if the error is retryable (exclude 400, 401, 403, 404 client errors)
+                is_retryable = True
+                if hasattr(e, 'response') and e.response is not None:
+                    status_code = e.response.status_code
+                    if status_code in [400, 401, 403, 404]:
+                        is_retryable = False
+
+                if is_retryable and attempt < max_retries - 1:
+                    logger.warning("LLM API request failed (attempt %d/%d) with error: %s. Retrying in %.1f seconds...", 
+                                   attempt + 1, max_retries, str(e), retry_delay)
+                    time.sleep(retry_delay)
+                    retry_delay *= 1.5  # exponential backoff
+                else:
+                    logger.exception("LLM API request failed permanently after %d attempts. Error: %s", attempt + 1, str(e))
+                    raise e
+        
+        if prov == 'gemini':
+            raw_content = resp.json()['candidates'][0]['content']['parts'][0]['text'].strip()
+        else:
+            raw_content = resp.json()['choices'][0]['message']['content'].strip()
+
+        content = raw_content
+        content = re.sub(r'<think>[\s\S]*?(</think>|$)', '', content).strip()
+        content = re.sub(r'```json\s*', '', content)
+        content = re.sub(r'```\s*', '', content)
+        content = content.strip()
+
+        start = content.find('[')
+        end = content.rfind(']')
+        if start != -1 and end != -1 and end > start:
+            content = content[start:end+1]
+        
+        content = re.sub(r',\s*\]', ']', content)
+        content = re.sub(r',\s*\}', '}', content)
+
+        def escape_json_newlines(s: str) -> str:
+            res_chars = []
+            in_str = False
+            esc = False
+            for char in s:
+                if char == '"' and not esc:
+                    in_str = not in_str
+                if char == '\\' and not esc:
+                    esc = True
+                else:
+                    esc = False
+                
+                if char == '\n' and in_str:
+                    res_chars.append('\\n')
+                elif char == '\r' and in_str:
+                    res_chars.append('\\r')
+                else:
+                    res_chars.append(char)
+            return "".join(res_chars)
+
+        content = escape_json_newlines(content)
+
+        try:
+            return json.loads(content, strict=False)
+        except Exception as json_err:
+            logger.error("JSON parsing failed for provider %s: %s", prov, str(json_err))
+            logger.error("Raw content: %s", raw_content)
+            try:
+                entries = _fallback_extract(content)
+                if entries:
+                    logger.info("Fallback parser successfully recovered %d entries", len(entries))
+                    return entries
+            except Exception as fb_err:
+                logger.error("Fallback parser also failed: %s", str(fb_err))
+            raise json_err
 
     try:
-        # 使用 strict=False 允許字串中包含未逸出的控制字元 (如真實換行)
-        return json.loads(content, strict=False)
-    except Exception as e:
-        logger.error("LLM Extraction JSON Parsing Failed!")
-        logger.error(f"Error detail: {e}")
-        logger.error(f"Raw LLM output:\n{raw_content}")
-        logger.error(f"Extracted content to parse:\n{content}")
+        return do_request(provider)
+    except Exception as primary_err:
+        logger.warning("Primary LLM extraction failed: %s", str(primary_err))
+        gemini_key = os.getenv('GEMINI_API_KEY', '').strip()
+        if provider != 'gemini' and gemini_key:
+            logger.info("Triggering automatic fallback to Gemini...")
+            try:
+                return do_request('gemini')
+            except Exception as fallback_err:
+                logger.error("Fallback to Gemini also failed: %s", str(fallback_err))
         
-        # fallback 嘗試：利用 robust fallback 解析器從格式損壞的 JSON 或 Markdown 清單中提取資料
-        try:
-            entries = _fallback_extract(content)
-            if entries:
-                logger.info(f"Robust fallback parser successfully recovered {len(entries)} entries!")
-                return entries
-        except Exception as e2:
-            logger.error(f"Fallback parser also failed: {e2}")
-            
-        raise ValueError(f"無法解析 AI 回傳的資料格式：{e}。請縮短文字或提供更簡單的內容後再試。")
+        raise ValueError(f"無法解析 AI 回傳的資料格式：{str(primary_err)}。請縮短文字或提供更簡單的內容後再試。")
+
+
+
 
 
 @app.route('/knowledge/ai-collect/detect-url', methods=['POST'])
