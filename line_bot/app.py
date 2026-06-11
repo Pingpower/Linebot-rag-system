@@ -210,7 +210,7 @@ def _strip_markdown(text: str) -> str:
     return text.strip()
 
 
-def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_reply: str, logo_url: str = None, user_id: str = None, force_push: bool = False):
+def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_reply: str, logo_url: str = None, user_id: str = None, force_push: bool = False, suggested_buttons: list = None):
     """回覆 LINE 訊息，優先使用精美設計的 Flex Message，支援 [FLEX_CARD] 解析與自訂 Logo，且支援超時自動降級為 Push Message"""
     if not ai_reply or not ai_reply.strip():
         ai_reply = "抱歉，我目前無法回答這個問題。"
@@ -415,6 +415,26 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
                         "margin": "xs"
                     })
                 
+                # 如果 AI 輸出的圖卡沒有帶按鈕，且有傳入預設的建議引導按鈕，則在此填補
+                if not footer_buttons and suggested_buttons:
+                    for btn in suggested_buttons:
+                        label = btn.get('label', '了解更多')
+                        btn_text = btn.get('text', label)
+                        uri = btn.get('uri')
+                        btn_action = {}
+                        if uri:
+                            btn_action = {"type": "uri", "label": label, "uri": uri}
+                        else:
+                            btn_action = {"type": "message", "label": label, "text": btn_text}
+                        footer_buttons.append({
+                            "type": "button",
+                            "style": "primary",
+                            "color": "#4F46E5",
+                            "height": "sm",
+                            "action": btn_action,
+                            "margin": "xs"
+                        })
+                
                 bubble = {
                     "type": "bubble",
                     "header": {
@@ -481,6 +501,61 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
         else:
             # 如果沒有 card 且 messages 長度為空 (沒有 main_text)，才使用原本的預設 Flex Bubble
             if not messages:
+                # ── 自動為純文字 Flex Message 生成 footer 按鈕 ──
+                footer_contents = []
+                
+                # 如果有傳入建議按鈕，轉換成 LINE 按鈕
+                if suggested_buttons:
+                    for btn in suggested_buttons:
+                        label = btn.get('label', '了解更多')
+                        btn_text = btn.get('text', label)
+                        uri = btn.get('uri')
+                        
+                        btn_action = {}
+                        if uri:
+                            btn_action = {
+                                "type": "uri",
+                                "label": label,
+                                "uri": uri
+                            }
+                        else:
+                            btn_action = {
+                                "type": "message",
+                                "label": label,
+                                "text": btn_text
+                            }
+                            
+                        footer_contents.append({
+                            "type": "button",
+                            "style": "primary",
+                            "color": "#4F46E5",
+                            "height": "sm",
+                            "action": btn_action,
+                            "margin": "xs"
+                        })
+                        
+                # 加上提示語與分隔線
+                if footer_contents:
+                    footer_contents.insert(0, {
+                        "type": "separator",
+                        "color": "#F3F4F6",
+                        "margin": "sm"
+                    })
+                    footer_contents.append({
+                        "type": "separator",
+                        "color": "#F3F4F6",
+                        "margin": "md"
+                    })
+                
+                footer_contents.append({
+                    "type": "text",
+                    "text": "💡 提示：本訊息由本地 AI 依據知識庫自動整理生成",
+                    "size": "xxs",
+                    "color": "#9CA3AF",
+                    "margin": "md",
+                    "align": "center"
+                })
+
                 flex_json = {
                   "type": "bubble",
                   "header": {
@@ -507,21 +582,7 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
                   "footer": {
                     "type": "box",
                     "layout": "vertical",
-                    "contents": [
-                      {
-                        "type": "separator",
-                        "color": "#F3F4F6",
-                        "margin": "sm"
-                      },
-                      {
-                        "type": "text",
-                        "text": "💡 提示：本訊息由本地 AI 依據知識庫自動整理生成",
-                        "size": "xxs",
-                        "color": "#9CA3AF",
-                        "margin": "md",
-                        "align": "center"
-                      }
-                    ],
+                    "contents": footer_contents,
                     "paddingAll": "sm"
                   }
                 }
@@ -952,6 +1013,28 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
     save_messages(company['id'], user_id, user_message, clean_reply)
 
     # 7. 回覆 LINE
+    # RAG docs 推薦引導按鈕推導 (作為 AI 沒有主動產出 FLEX_CARD 時的 Fallback 推薦按鈕)
+    suggested_buttons = []
+    if docs:
+        query_prefix = user_message[:10].strip()
+        combined_content = " ".join(d['content'] for d in docs)
+        has_docs = any(kw in combined_content for kw in ['文件', '戶籍謄本', '證明', '身分證', '申請書', '應備', '所需'])
+        has_qualifications = any(kw in combined_content for kw in ['資格', '條件', '符合', '標準', '門檻'])
+        has_amount = any(kw in combined_content for kw in ['金額', '補助', '元', '津貼', '費用'])
+
+        if has_qualifications:
+            suggested_buttons.append({"label": "✅ 申請資格", "text": f"{query_prefix} 申請資格"})
+        if has_docs and len(suggested_buttons) < 3:
+            suggested_buttons.append({"label": "📄 應備文件", "text": f"{query_prefix} 應備文件"})
+        if has_amount and len(suggested_buttons) < 3:
+            suggested_buttons.append({"label": "💰 補助金額", "text": f"{query_prefix} 補助金額"})
+            
+        if len(docs) >= 2 and len(suggested_buttons) < 3:
+            second_title = docs[1]['title']
+            if second_title != docs[0]['title']:
+                suggested_buttons.append({"label": f"🔍 {second_title[:12]}", "text": second_title})
+        suggested_buttons = suggested_buttons[:3]
+
     # Always use Push Message (force_push=True) for RAG replies:
     # - handle_text_event runs in a background thread, reply_token expires in ~5 seconds.
     # - RAG + LLM typically takes 3-10+ seconds, making Reply Token almost always expired.
@@ -959,7 +1042,7 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
     #   the loading animation stuck. Push Message is reliable and consistent.
     config = Configuration(access_token=company['line_access_token'])
     with ApiClient(config) as api_client:
-        reply_with_flex_or_text(api_client, reply_token, company.get('name', 'AI 客服助理'), ai_reply, logo_url=company.get('logo_url'), user_id=user_id, force_push=True)
+        reply_with_flex_or_text(api_client, reply_token, company.get('name', 'AI 客服助理'), ai_reply, logo_url=company.get('logo_url'), user_id=user_id, force_push=True, suggested_buttons=suggested_buttons)
 
 
 def handle_quick_summary_postback(company: dict, user_id: str, query_text: str):

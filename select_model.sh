@@ -67,23 +67,23 @@ fi
 # 根據目標模型自動配置最佳硬體參數
 M_NAME_LOWER=$(echo "$(basename "$SELECTED")" | tr '[:upper:]' '[:lower:]')
 FILE_SIZE_BYTES=$(stat -c%s "$SELECTED" 2>/dev/null || echo 0)
-FILE_SIZE_GB=$(( FILE_SIZE_BYTES / 1073741824 ))
+FILE_SIZE_MB=$(( FILE_SIZE_BYTES / 1048576 ))
 
 THREADS=8
 GPU_LAYERS=10
 CTX_SIZE=4096
 PARALLEL=1
 
-# 1. 判斷是否為極小模型
-if [[ "$M_NAME_LOWER" =~ "gemma-4" || "$M_NAME_LOWER" =~ "4b" || "$M_NAME_LOWER" =~ "3b" || "$M_NAME_LOWER" =~ "2b" || "$M_NAME_LOWER" =~ "gemma2-2b" ]]; then
+# 1. 判斷是否為極小模型 (符合關鍵字或檔案大小小於 3.5 GB 即 3584 MB)
+if [[ "$M_NAME_LOWER" =~ "gemma-4" || "$M_NAME_LOWER" =~ "4b" || "$M_NAME_LOWER" =~ "3b" || "$M_NAME_LOWER" =~ "2b" || "$M_NAME_LOWER" =~ "gemma2-2b" || "$M_NAME_LOWER" =~ "nemotron" ]] || [ "$FILE_SIZE_MB" -gt 100 ] && [ "$FILE_SIZE_MB" -lt 3584 ]; then
     GPU_LAYERS=99
     CTX_SIZE=4096
 # 2. 判斷是否為中等模型
 elif [[ "$M_NAME_LOWER" =~ "8b" || "$M_NAME_LOWER" =~ "7b" || "$M_NAME_LOWER" =~ "9b" || "$M_NAME_LOWER" =~ "gemma2-9b" ]]; then
     GPU_LAYERS=18
     CTX_SIZE=4096
-# 3. 檔案大小 fallback 判斷 (檔案小於 7 GB 但剛好沒匹配到關鍵字)
-elif [ "$FILE_SIZE_GB" -gt 0 ] && [ "$FILE_SIZE_GB" -lt 7 ]; then
+# 3. 檔案大小 fallback 判斷 (檔案小於 7 GB 即 7168 MB 但剛好沒匹配到關鍵字)
+elif [ "$FILE_SIZE_MB" -gt 100 ] && [ "$FILE_SIZE_MB" -lt 7168 ]; then
     GPU_LAYERS=18
     CTX_SIZE=4096
 fi
