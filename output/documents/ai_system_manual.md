@@ -123,12 +123,12 @@ bash ~/文件/backup_env.sh
 
 ### 1.5 LLaMA Server 參數微調與 GPU/CPU 效能優化
 
-模型伺服器 `llama-server` 的啟動設定記錄於 `linebot-llama.service` 中，我們可以根據硬體資源優化下列參數：
+模型伺服器 `llama-server` 的啟動設定記錄於 `linebot-llama.service` 中，在部署與恢復系統時，應根據當前機器的 CPU 與顯示卡規格優化下列核心參數：
 
-- `--ctx-size 8192`：調整上下文長度限制（記憶體不足時可下調至 `4096` 或 `2048`）。
-- `--n-gpu-layers 15`：指定加載到 GPU 上的神經網路層數。若 GPU 記憶體較小或在純 CPU 環境，可將此值設為 `0`；若顯存足夠，可設為 `99` (全 GPU 加載)，能顯著增快推理速度。
-- `--threads 8`：使用的 CPU 線程數。建議設定為實體 CPU 核心數 (例如 `nproc` 的一半到 80%)，過多執行緒會造成執行緒競爭而拖慢效能。
-- `--parallel 2`：平行請求處理數。可允許同時為多少個 LINE 使用者進行生成，通常在本地端設為 `1` 或 `2` 以確保單次產出流暢度。
+- `--threads 6` 與 `--threads-batch 6`：使用的 CPU 運算執行緒數。**強烈建議設定為實體 CPU 核心數**（如您目前更換的 Ryzen 5 5600GT 有 6 個實體核心，則設為 `6`）。設為超執行緒數（如 12）或過大（如 8）會因 CPU 核心競爭與切換開銷導致效能下降。
+- `--n-gpu-layers 99`：指定加載到 GPU 上的神經網路層數。若 VRAM 足夠（如您的 3050 6GB 運行 <= 4.8GB 的量化模型時），設為 `99` (全 GPU 載入) 可獲得最高的推理效能；若模型較大（如 7B/8B 約 5G 以上），可部分卸載（例如設定為 `24`），其餘由 CPU 執行。
+- `--flash-attn on`：指定啟用 Flash Attention。在 Ampere 以上架構（如 RTX 3050）下能大幅加快注意力機制運算並顯著縮減 KV Cache 顯存佔用。**注意：必須明確指定 `on`，不可只寫 `auto` 以防新版 llama.cpp 的參數解析器誤將後續旗標當作值讀入而報錯退出**。
+- `--parallel 1`：平行請求處理數。在 6GB 等中低階顯卡上運行時，強烈建議設為 `1`，以防多個使用者同時發問時導致 VRAM 溢出（OOM）崩潰。
 
 ### 1.6 互動式模型切換與更換操作指南
 
@@ -147,10 +147,11 @@ bash ~/my_project/select_model.sh
 1. 腳本會自動掃描您在 `WORKSPACE/models/` 目錄下存放的所有 `.gguf` 檔案。
 2. 畫面會列出可用模型列表、檔案大小，以及當前正啟用的模型標記。
 3. 依照提示輸入對應的編號並按 Enter 鍵確認。
-4. **自動化硬體參數配置**：為了避免顯存溢出 (OOM) 或未妥善利用 GPU 加速，後台在切換模型時會進行**智慧型分級參數配置**並寫入 `engine_config.json`：
-   - **Tiny 模型 (如 Gemma-4 E4B 等 <= 4B 模型)**：自動配置為全 GPU 加速 (`gpu_layers = 99`)，上下文窗口為 `ctx_size = 8192`。
-   - **Medium 模型 (如 7B - 9B 模型，如 Llama 3 8B)**：自動配置為 `gpu_layers = 18`，上下文窗口限制在 `ctx_size = 4096` 以防 GTX 1060 (6GB) 顯存溢出。
-   - **Large/MoE 模型 (其他大模型)**：自動降為 `gpu_layers = 10`，`ctx_size = 4096`。
+4. **自動化硬體參數配置**：為了避免顯存溢出 (OOM) 或未妥善利用 GPU 加速，後台（包含 `select_model.sh` 與後台網頁一鍵切換 API）在切換模型時會進行**智慧型分級參數配置**並寫入 `engine_config.json`：
+   - **Tiny 模型 (如 Gemma-4 E4B 等 <= 4.8 GB 模型)**：自動配置為全 GPU 加速 (`gpu_layers = 99`)，上下文窗口設為 `ctx_size = 4096`（對齊 RTX 3050 6GB 顯存容量）。
+   - **Medium 模型 (如 7B - 9B 模型，大小約 4.8 GB ~ 7.5 GB)**：自動配置為 `gpu_layers = 24`，`ctx_size = 4096`（以防 6GB 顯卡顯存溢出）。
+   - **Large/MoE 模型 (其他大模型)**：自動降為 `gpu_layers = 20`，`ctx_size = 4096`。
+   - 所有的 CPU 運算執行緒均對齊當前機器的 **6 核心** 最佳設定 (`threads = 6`)。
 5. 腳本會自動覆寫 `systemd` 服務配置檔中的模型路徑，並寫入選取紀錄至 `~/.config/linebot/selected_model`。
 6. 腳本會自動呼叫 `systemctl --user daemon-reload` 與 `systemctl --user restart linebot-llama` 重啟模型服務。
 

@@ -318,24 +318,24 @@ def register_models_routes(app):
                 
             # 預設分級
             model_class = "large"
-            if any(kw in m_name_lower for kw in ["gemma-4", "4b", "3b", "2b", "gemma2-2b", "lfm", "a1b", "nemotron"]) or (0.1 <= file_size_gb < 3.5):
+            if any(kw in m_name_lower for kw in ["gemma-4", "4b", "3b", "2b", "gemma2-2b", "lfm", "a1b", "nemotron"]) or (0.1 <= file_size_gb < 4.8):
                 model_class = "tiny"
             elif any(kw in m_name_lower for kw in ["8b", "7b", "9b", "gemma2-9b"]):
                 model_class = "medium"
-            elif 0.1 <= file_size_gb < 6.5:
+            elif 0.1 <= file_size_gb < 7.5:
                 model_class = "medium"
 
             if model_class == "tiny":
-                threads = 8
+                threads = 6
                 gpu_layers = 99
                 ctx_size = 4096
             elif model_class == "medium":
-                threads = 8
-                gpu_layers = 18
+                threads = 6
+                gpu_layers = 24
                 ctx_size = 4096
             else:
-                threads = 8
-                gpu_layers = 10
+                threads = 6
+                gpu_layers = 20
                 ctx_size = 4096
 
             user_systemd = os.path.expanduser("~/.config/systemd/user")

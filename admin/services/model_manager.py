@@ -336,7 +336,7 @@ def _switch_model_worker(selected_path, model_name, old_selected_path, old_cfg, 
             extra_args.append("--cpu-moe")
         extra_args.append("--no-mmap")
         extra_args.append("--mlock")
-        extra_args.append("--flash-attn auto")
+        extra_args.append("--flash-attn on")
         extra_str = " ".join(extra_args)
         
         content = f"""[Unit]

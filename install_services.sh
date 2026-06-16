@@ -30,7 +30,7 @@ else
     echo "自動選擇模型：$CURRENT_MODEL"
 fi
 
-LLAMA_BIN="$WORKSPACE/llama-server"
+LLAMA_BIN="$WORKSPACE/llama.cpp/build/bin/llama-server"
 
 # ── 2. llama-server 服務 ────────────────────────────────────
 cat > "$USER_SYSTEMD/linebot-llama.service" << EOF
@@ -41,15 +41,16 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$WORKSPACE
-ExecStartPre=/bin/bash -c 'pkill -f llama-server || true; sleep 1'
 ExecStart=$LLAMA_BIN \\
     --model $(cat $MODEL_CONFIG) \\
     --host 127.0.0.1 \\
     --port 8080 \\
-    --ctx-size 8192 \\
-    --n-gpu-layers 15 \\
-    --threads 8 \\
-    --parallel 2 \\
+    --ctx-size 4096 \\
+    --n-gpu-layers 99 \\
+    --threads 6 \\
+    --threads-batch 6 \\
+    --parallel 1 \\
+    --no-mmap --mlock --flash-attn on \\
     --log-disable
 Restart=always
 RestartSec=5
@@ -104,7 +105,7 @@ WantedBy=default.target
 EOF
 
 # ── 5. Cloudflare Tunnel 服務 ──────────────────────────────
-CLOUDFLARED=$(which cloudflared 2>/dev/null || echo "$HOME/.cloudflared/cloudflared")
+CLOUDFLARED=$(which cloudflared 2>/dev/null || echo "$WORKSPACE/cloudflared")
 cat > "$USER_SYSTEMD/linebot-tunnel.service" << EOF
 [Unit]
 Description=LINE Bot Cloudflare Tunnel

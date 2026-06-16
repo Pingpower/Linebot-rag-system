@@ -780,21 +780,33 @@
       }
   }
 
-  // 一鍵啟用模型
+  // 一鍵啟用模型 (新增狀態輪詢與讀取動畫)
   async function switchModel(modelName) {
       if (!confirm(`確定要切換至模型：${modelName} 嗎？\n服務重啟需要約 15~30 秒，期間 AI 客服將會短暫離線。`)) {
           return;
       }
       
-      // 顯示正在重啟的動畫提示
       const container = document.getElementById('local-models-list');
-      container.innerHTML = `
-          <div class="text-center py-8">
-              <span class="status-dot red" style="animation: pulse 1s infinite;"></span>
-              <p style="margin-top: 10px; font-weight: 600;">正在重啟 LLaMA 引擎，載入新模型中，請稍候...</p>
-              <p class="hint text-muted">系統正在調用 systemctl 重啟服務</p>
-          </div>
-      `;
+      
+      // 動態渲染動畫，並加上不斷閃爍的進度狀態字樣
+      function showProgressMessage(message) {
+          container.innerHTML = `
+              <style>
+                  @keyframes ui-spin {
+                      0% { transform: rotate(0deg); }
+                      100% { transform: rotate(360deg); }
+                  }
+              </style>
+              <div class="text-center py-8" style="background: rgba(255,255,255,0.02); border-radius: 12px; border: 1px dashed var(--border); padding: 40px 20px;">
+                  <div class="spinner" style="width: 40px; height: 40px; border: 4px solid rgba(255,255,255,0.1); border-top-color: var(--primary); border-radius: 50%; animation: ui-spin 1s linear infinite; margin: 0 auto 20px;"></div>
+                  <span class="status-dot green" style="animation: pulse 1.5s infinite; display: inline-block;"></span>
+                  <p id="switch-status-msg" style="margin-top: 10px; font-size: 15px; font-weight: 600; color: var(--text);">${message}</p>
+                  <p class="hint text-muted" style="margin-top: 8px; font-size: 12px;">系統正在進行 Systemd 重啟與顯存清理，請勿重整頁面...</p>
+              </div>
+          `;
+      }
+      
+      showProgressMessage("正在準備重啟 LLaMA 引擎...");
       
       try {
           const res = await fetch('/api/models/switch', {
@@ -806,12 +818,54 @@
           if (data.error) {
               alert(`切換失敗: ${data.error}`);
               window.location.reload();
-          } else {
-              alert(data.msg);
-              setTimeout(() => {
-                  window.location.reload();
-              }, 4000);
+              return;
           }
+          
+          // 開始輪詢後台切換狀態
+          let pollCount = 0;
+          const pollInterval = setInterval(async () => {
+              pollCount++;
+              try {
+                  const statusRes = await fetch('/api/models/switch/status');
+                  const statusData = await statusRes.json();
+                  
+                  if (statusData.status === 'switching') {
+                      // 更新前台顯示的進度訊息
+                      showProgressMessage(statusData.message || "正在重啟 LLaMA 引擎中...");
+                  } else if (statusData.status === 'success') {
+                      clearInterval(pollInterval);
+                      container.innerHTML = `
+                          <div class="text-center py-8">
+                              <span class="status-dot green" style="width: 12px; height: 12px; display: inline-block;"></span>
+                              <p style="margin-top: 10px; font-weight: 600; color: #10B981;">✅ ${statusData.message || '模型切換成功！'}</p>
+                          </div>
+                      `;
+                      setTimeout(() => {
+                          window.location.reload();
+                      }, 2000);
+                  } else if (statusData.status === 'failed') {
+                      clearInterval(pollInterval);
+                      container.innerHTML = `
+                          <div class="text-center py-8">
+                              <span class="status-dot red" style="width: 12px; height: 12px; display: inline-block;"></span>
+                              <p style="margin-top: 10px; font-weight: 600; color: var(--danger);">❌ 切換失敗: ${statusData.error || '未知錯誤'}</p>
+                          </div>
+                      `;
+                      setTimeout(() => {
+                          window.location.reload();
+                      }, 4000);
+                  }
+              } catch (err) {
+                  console.error("Poll switch status error:", err);
+                  // 容錯，若暫時連不上 (例如服務重啟中 admin 偶爾回應慢)，重試最多 15 次
+                  if (pollCount > 15) {
+                      clearInterval(pollInterval);
+                      alert("無法取得引擎重啟狀態，將重整頁面確認。");
+                      window.location.reload();
+                  }
+              }
+          }, 1500); // 每 1.5 秒查詢一次
+          
       } catch (err) {
           alert("請求切換失敗，請稍後再試！");
           window.location.reload();

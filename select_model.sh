@@ -69,22 +69,22 @@ M_NAME_LOWER=$(echo "$(basename "$SELECTED")" | tr '[:upper:]' '[:lower:]')
 FILE_SIZE_BYTES=$(stat -c%s "$SELECTED" 2>/dev/null || echo 0)
 FILE_SIZE_MB=$(( FILE_SIZE_BYTES / 1048576 ))
 
-THREADS=8
+THREADS=6
 GPU_LAYERS=10
 CTX_SIZE=4096
 PARALLEL=1
 
-# 1. 判斷是否為極小模型 (符合關鍵字或檔案大小小於 3.5 GB 即 3584 MB)
-if [[ "$M_NAME_LOWER" =~ "gemma-4" || "$M_NAME_LOWER" =~ "4b" || "$M_NAME_LOWER" =~ "3b" || "$M_NAME_LOWER" =~ "2b" || "$M_NAME_LOWER" =~ "gemma2-2b" || "$M_NAME_LOWER" =~ "nemotron" ]] || [ "$FILE_SIZE_MB" -gt 100 ] && [ "$FILE_SIZE_MB" -lt 3584 ]; then
+# 1. 判斷是否為極小模型 (符合關鍵字或檔案大小小於 4.8 GB 即 4915 MB)
+if [[ "$M_NAME_LOWER" =~ "gemma-4" || "$M_NAME_LOWER" =~ "4b" || "$M_NAME_LOWER" =~ "3b" || "$M_NAME_LOWER" =~ "2b" || "$M_NAME_LOWER" =~ "gemma2-2b" || "$M_NAME_LOWER" =~ "nemotron" ]] || [ "$FILE_SIZE_MB" -gt 100 ] && [ "$FILE_SIZE_MB" -lt 4915 ]; then
     GPU_LAYERS=99
     CTX_SIZE=4096
 # 2. 判斷是否為中等模型
 elif [[ "$M_NAME_LOWER" =~ "8b" || "$M_NAME_LOWER" =~ "7b" || "$M_NAME_LOWER" =~ "9b" || "$M_NAME_LOWER" =~ "gemma2-9b" ]]; then
-    GPU_LAYERS=18
+    GPU_LAYERS=24
     CTX_SIZE=4096
-# 3. 檔案大小 fallback 判斷 (檔案小於 7 GB 即 7168 MB 但剛好沒匹配到關鍵字)
-elif [ "$FILE_SIZE_MB" -gt 100 ] && [ "$FILE_SIZE_MB" -lt 7168 ]; then
-    GPU_LAYERS=18
+# 3. 檔案大小 fallback 判斷 (檔案小於 7.5 GB 即 7680 MB 但剛好沒匹配到關鍵字)
+elif [ "$FILE_SIZE_MB" -gt 100 ] && [ "$FILE_SIZE_MB" -lt 7680 ]; then
+    GPU_LAYERS=20
     CTX_SIZE=4096
 fi
 
@@ -95,7 +95,7 @@ if [[ "$M_NAME_LOWER" =~ "moe" || "$M_NAME_LOWER" =~ "a3b" || "$M_NAME_LOWER" =~
 fi
 EXTRA_ARGS+=("--no-mmap")
 EXTRA_ARGS+=("--mlock")
-EXTRA_ARGS+=("--flash-attn auto")
+EXTRA_ARGS+=("--flash-attn on")
 EXTRA_STR="${EXTRA_ARGS[*]}"
 
 # 更新 systemd 服務 ExecStart 的模型路徑與優化參數
