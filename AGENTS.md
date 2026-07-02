@@ -41,3 +41,7 @@ Co-Authored-By: Antigravity <noreply@antigravity.dev>
 2. Generate → `generate_image` tool
 3. Refine → Iterate with feedback
 4. Deliver → Move to output/designs/
+
+## LLM & RAG Integration Conventions
+- **LLM Output Correction (Faulty Markdown)**: When parsing Markdown code blocks or JSON blocks (such as `[FLEX_CARD]`) from an LLM response, always implement defensive preprocessing to normalize anomalies where backticks (\`\`\`) are outputted as commas (,,, or , , ,). Use regular expressions to replace them before executing cleans or parses.
+- **RAG Semantic Cache Invalidation**: When using a semantic cache alongside a RAG knowledge base, ensure that any write operations (adds, updates, deletions, imports) in the knowledge base trigger a "semantic cache invalidation" process. Query the vector index for cached questions with similarity >= 0.85 and mark them inactive (or delete them) to preserve cache consistency.

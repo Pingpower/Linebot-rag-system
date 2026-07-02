@@ -2,6 +2,28 @@ from flask import render_template, request, redirect, url_for, jsonify
 from config import sb, login_required, get_company, get_companies, logger
 
 def register_history_routes(app):
+    import os
+    import sys
+    line_bot_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../line_bot'))
+    if line_bot_path not in sys.path:
+        sys.path.append(line_bot_path)
+    
+    try:
+        from semantic_cache import get_embedding
+    except ImportError:
+        get_embedding = None
+
+    def _compute_embedding(title: str, content: str):
+        if not get_embedding:
+            logger.warning("get_embedding is not available. Embedding set to None.")
+            return None
+        try:
+            text_to_embed = f"標題：{title}\n內容：{content}"
+            return get_embedding(text_to_embed)
+        except Exception as e:
+            logger.error(f"Failed to generate embedding in history module: {e}")
+            return None
+
     @app.route('/history')
     @login_required
     def chat_history_view():
@@ -80,11 +102,13 @@ def register_history_routes(app):
                 
             tags = [t.strip() for t in tags_str.split(',') if t.strip()] if tags_str else []
             
+            emb = _compute_embedding(title, content)
             sb.table('knowledge_base').insert({
                 'company_id': company_id,
                 'title': title,
                 'content': content,
                 'tags': tags,
+                'embedding': emb,
                 'is_active': True
             }).execute()
             

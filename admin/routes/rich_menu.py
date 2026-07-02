@@ -8,6 +8,28 @@ from linebot.v3.messaging import (
 )
 from config import sb, login_required, get_company, get_companies, logger
 
+def _parse_line_error(e):
+    """Parse LINE Bot SDK exceptions into human-readable messages (Rule #6)"""
+    import json
+    if hasattr(e, 'body') and e.body:
+        try:
+            err_data = json.loads(e.body)
+            if 'message' in err_data:
+                return f"LINE 伺服器錯誤: {err_data['message']}"
+        except Exception:
+            pass
+            
+    status = getattr(e, 'status', None)
+    if status == 401:
+        return "LINE 憑證 (Access Token) 驗證失敗，請檢查該公司的憑證配置。"
+    elif status == 400:
+        return "LINE 請求格式錯誤。請確認圖片解析度或熱區坐標設定符合規範。"
+    elif status == 404:
+        return "在 LINE 伺服器上找不到該富選單資源。"
+    elif status == 429:
+        return "LINE API 請求次數超出限制，請稍候重試。"
+    return str(e)
+
 def register_rich_menu_routes(app):
     @app.route('/rich_menu')
     @login_required
@@ -53,8 +75,13 @@ def register_rich_menu_routes(app):
         if not name or not chat_bar_text or not width_val or not height_val:
             return jsonify({'error': 'Missing required fields'}), 400
 
-        if width_val != 1200 or height_val != 810:
-            return jsonify({'error': '圖片尺寸不符合規範。本系統強制限制寬度必須為 1200px，高度必須為 810px。'}), 400
+        # LINE 官方支援的 6 種標準 Full/Compact 尺寸組合
+        SUPPORTED_SIZES = [
+            (2500, 1686), (1200, 810), (800, 540),  # Full size
+            (2500, 843),  (1200, 405), (800, 270)   # Compact size
+        ]
+        if (width_val, height_val) not in SUPPORTED_SIZES:
+            return jsonify({'error': '選單尺寸不符合 LINE 規範。請使用標準解析度，例如 1200x810 (大型選單) 或 1200x405 (小型選單)。'}), 400
 
         img_bytes = image_file.read()
         if len(img_bytes) > 1 * 1024 * 1024:
@@ -68,8 +95,8 @@ def register_rich_menu_routes(app):
             import io
             img = Image.open(io.BytesIO(img_bytes))
             w, h = img.size
-            if w != 1200 or h != 810:
-                return jsonify({'error': f'上傳的圖片實際尺寸為 {w}x{h}px，不符合系統要求的 1200x810px 限制。'}), 400
+            if (w, h) not in SUPPORTED_SIZES:
+                return jsonify({'error': f'上傳圖片的實際尺寸為 {w}x{h}px，不符合 LINE 官方要求的標準解析度限制（例如 1200x810 或 1200x405）。'}), 400
         except Exception as e:
             logger.warning("Failed to validate uploaded image dimensions: %s", str(e))
             return jsonify({'error': '圖片格式有誤或無法解析實際尺寸。'}), 400
@@ -132,7 +159,7 @@ def register_rich_menu_routes(app):
             messaging_api_blob.set_rich_menu_image(
                 rich_menu_id=rich_menu_id,
                 body=img_bytes,
-                headers={'Content-Type': image_file.content_type}
+                _headers={'Content-Type': image_file.content_type}
             )
             
             # 5. Save image locally for dashboard view
@@ -166,7 +193,7 @@ def register_rich_menu_routes(app):
             
         except Exception as e:
             logger.exception("Failed to create rich menu")
-            return jsonify({'error': f"LINE API error: {str(e)}"}), 500
+            return jsonify({'error': _parse_line_error(e)}), 500
 
     @app.route('/companies/<company_id>/richmenu/<rich_menu_id>/activate', methods=['POST'])
     @login_required
@@ -195,7 +222,7 @@ def register_rich_menu_routes(app):
             return jsonify({'success': True})
         except Exception as e:
             logger.exception("Failed to activate rich menu")
-            return jsonify({'error': f"LINE API error: {str(e)}"}), 500
+            return jsonify({'error': _parse_line_error(e)}), 500
 
     @app.route('/companies/<company_id>/richmenu/deactivate', methods=['POST'])
     @login_required
@@ -223,7 +250,7 @@ def register_rich_menu_routes(app):
             return jsonify({'success': True})
         except Exception as e:
             logger.exception("Failed to deactivate rich menu")
-            return jsonify({'error': f"LINE API error: {str(e)}"}), 500
+            return jsonify({'error': _parse_line_error(e)}), 500
 
     @app.route('/companies/<company_id>/richmenu/<rich_menu_id>/delete', methods=['POST'])
     @login_required
@@ -265,4 +292,74 @@ def register_rich_menu_routes(app):
             return jsonify({'success': True})
         except Exception as e:
             logger.exception("Failed to delete rich menu")
-            return jsonify({'error': f"Failed to delete: {str(e)}"}), 500
+            return jsonify({'error': _parse_line_error(e)}), 500
+
+    @app.route('/companies/<company_id>/richmenu/sync', methods=['POST'])
+    @login_required
+    def rich_menu_sync(company_id):
+        company = get_company(company_id)
+        if not company:
+            return jsonify({'error': 'Company not found'}), 404
+            
+        token = company.get('line_access_token')
+        if not token:
+            return jsonify({'error': 'LINE Access Token not configured'}), 400
+            
+        try:
+            config = Configuration(access_token=token)
+            api_client = ApiClient(config)
+            messaging_api = MessagingApi(api_client)
+            
+            # 1. Fetch all rich menus currently on LINE server
+            line_menus_resp = messaging_api.get_rich_menu_list()
+            line_menu_ids = {m.rich_menu_id for m in line_menus_resp.rich_menus}
+            
+            # 2. Fetch current default rich menu ID on LINE
+            default_menu_id = None
+            try:
+                default_resp = messaging_api.get_default_rich_menu_id()
+                default_menu_id = default_resp.rich_menu_id
+            except Exception as def_err:
+                # 404 NotFound might mean no default rich menu is set
+                if getattr(def_err, 'status', None) != 404:
+                    logger.warning("Failed to fetch default rich menu ID: %s", str(def_err))
+            
+            # 3. Fetch all rich menus recorded in local database
+            r = sb.table('company_rich_menus').select('*').eq('company_id', company_id).execute()
+            db_menus = r.data or []
+            
+            # 4. Synchronize state
+            deleted_count = 0
+            updated_count = 0
+            
+            for db_menu in db_menus:
+                rm_id = db_menu['rich_menu_id']
+                if rm_id not in line_menu_ids:
+                    # Clean local cached image file
+                    if db_menu.get('image_url'):
+                        local_filename = os.path.basename(db_menu['image_url'])
+                        local_filepath = os.path.join(current_app.root_path, 'static', 'uploads', local_filename)
+                        if os.path.exists(local_filepath):
+                            try:
+                                os.remove(local_filepath)
+                            except Exception as file_err:
+                                logger.warning("Failed to remove local file %s during sync: %s", local_filepath, str(file_err))
+                    # Remove from DB
+                    sb.table('company_rich_menus').delete().eq('rich_menu_id', rm_id).execute()
+                    deleted_count += 1
+                else:
+                    # Sync its is_active state
+                    should_be_active = (rm_id == default_menu_id)
+                    if db_menu['is_active'] != should_be_active:
+                        sb.table('company_rich_menus').update({'is_active': should_be_active}).eq('rich_menu_id', rm_id).execute()
+                        updated_count += 1
+                        
+            logger.info("Sync rich menus completed for company %s. Deleted %d dead menus, updated %d active statuses.", company_id, deleted_count, updated_count)
+            return jsonify({
+                'success': True,
+                'msg': f"同步完成！已清理 LINE 端已不存在的選單 {deleted_count} 個，更新啟用狀態 {updated_count} 個。"
+            })
+            
+        except Exception as e:
+            logger.exception("Failed to sync rich menus")
+            return jsonify({'error': _parse_line_error(e)}), 500

@@ -297,6 +297,60 @@
   </div>
   {% endif %}
 </div>
+
+<!-- Semantic Cache Management -->
+<div class="card mb-4">
+  <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap;">
+    <div>
+      <h2 class="card-title">⚡ 語意快取管理</h2>
+      <span class="text-muted text-sm">相似度高於 92% 的常見問答將直接以快取回覆，提供毫秒級的極速響應</span>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th style="width: 30%;">使用者提問</th>
+          <th style="width: 50%;">快取回覆內容</th>
+          <th style="width: 10%;">狀態</th>
+          <th style="width: 10%;">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for cache in cache_entries %}
+        <tr>
+          <td>
+            <div style="font-weight: 500; word-break: break-all;">{{ cache.query_text }}</div>
+          </td>
+          <td>
+            <div class="cache-reply-container" data-raw="{{ cache.reply_data }}">
+              <div class="cache-reply-text" style="white-space: pre-wrap; word-break: break-all; font-size: 0.9rem;"></div>
+              <div class="cache-reply-flex-badge" style="display:none; margin-top:0.35rem;">
+                <span style="background:rgba(99,102,241,0.15); color:#a5b4fc; border:1px solid rgba(165,180,252,0.3); font-size:0.75rem; padding:0.2rem 0.5rem; border-radius:6px; cursor:pointer; display:inline-block; transition: all 0.2s;" onclick="showFlexModal(this)" onmouseover="this.style.background='rgba(99,102,241,0.25)'" onmouseout="this.style.background='rgba(99,102,241,0.15)'">🗂️ 含有 Flex 輪播卡片 (點擊展開 JSON)</span>
+                <pre class="cache-reply-flex-json" style="display:none; font-size:0.75rem; background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.08); padding:0.6rem; border-radius:6px; max-height:220px; overflow:auto; margin-top:0.4rem; color:#cbd5e1; font-family:monospace; line-height:1.4;"></pre>
+              </div>
+            </div>
+          </td>
+          <td>
+            <span class="status-dot {% if cache.is_active %}green{% else %}red{% endif %}" title="啟用中"></span>
+          </td>
+          <td>
+            <form method="POST" action="{{ url_for('knowledge_cache_delete', cache_id=cache.id) }}"
+                  onsubmit="return confirm('確定要刪除此筆語意快取嗎？刪除後對應的問答將重新進行 LLM 推理生成。')">
+              <input type="hidden" name="company_id" value="{{ selected.id }}">
+              <button class="btn btn-sm btn-danger" type="submit">🗑️</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="4" class="text-center text-muted py-8">目前無任何語意快取項目。當 LINE 用戶提問且 AI 完成回答後，系統將自動學習並建立快取。</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
 {% endif %}
 {% endblock %}
 
@@ -672,6 +726,20 @@ function renderPreview(entries) {
           <input type="text" id="entry-tags-${i}" value="${(e.tags||[]).join(', ')}">
         </div>
       </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem;margin-bottom:.75rem">
+        <div>
+          <div class="ai-entry-label">🎯 適用對象 (目標受眾)</div>
+          <input type="text" id="entry-target-${i}" value="${escHtml(e.target || '')}" placeholder="例如：滿 65 歲以上長者">
+        </div>
+        <div>
+          <div class="ai-entry-label">💬 引導按鈕文字 (點擊發送)</div>
+          <input type="text" id="entry-action-${i}" value="${escHtml(e.action_text || '')}" placeholder="例如：我想了解敬老津貼">
+        </div>
+      </div>
+      <div style="margin-bottom:.75rem">
+        <div class="ai-entry-label">📝 AI 一句話摘要 (LINE 輪播簡介)</div>
+        <input type="text" id="entry-summary-${i}" value="${escHtml(e.summary || '')}" placeholder="簡短一句話概述，不超過 60 字">
+      </div>
       <div>
         <div class="ai-entry-label">內容</div>
         <textarea id="entry-content-${i}" rows="4">${escHtml(e.content)}</textarea>
@@ -694,9 +762,12 @@ async function saveAllEntries() {
   cards.forEach(card => {
     const i = card.id.replace('entry-card-', '');
     entries.push({
-      title:   document.getElementById('entry-title-' + i)?.value.trim() || '',
-      content: document.getElementById('entry-content-' + i)?.value.trim() || '',
-      tags:    document.getElementById('entry-tags-' + i)?.value.trim() || '',
+      title:       document.getElementById('entry-title-' + i)?.value.trim() || '',
+      content:     document.getElementById('entry-content-' + i)?.value.trim() || '',
+      tags:        document.getElementById('entry-tags-' + i)?.value.trim() || '',
+      summary:     document.getElementById('entry-summary-' + i)?.value.trim() || '',
+      target:      document.getElementById('entry-target-' + i)?.value.trim() || '',
+      action_text: document.getElementById('entry-action-' + i)?.value.trim() || '',
     });
   });
   if (!entries.length) { alert('沒有條目可儲存'); return; }
@@ -751,6 +822,50 @@ async function testSearch() {
       <p>${d.content}</p>
     </div>
   `).join('');
+}
+
+/* ── 語意快取解析與展示 ── */
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.cache-reply-container').forEach(container => {
+    const raw = container.getAttribute('data-raw') || '';
+    const flexRegex = /\[FLEX_CARD\]([\s\S]*?)\[\/FLEX_CARD\]/;
+    const match = raw.match(flexRegex);
+    
+    let cleanText = raw;
+    if (match) {
+      // 移除 [FLEX_CARD]...[/FLEX_CARD] 部分作為純文字顯示
+      cleanText = raw.replace(flexRegex, '').trim();
+      const badge = container.querySelector('.cache-reply-flex-badge');
+      const jsonPre = container.querySelector('.cache-reply-flex-json');
+      if (badge && jsonPre) {
+        badge.style.display = 'block';
+        try {
+          const parsed = JSON.parse(match[1]);
+          jsonPre.textContent = JSON.stringify(parsed, null, 2);
+        } catch (e) {
+          jsonPre.textContent = match[1];
+        }
+      }
+    }
+    
+    const textDiv = container.querySelector('.cache-reply-text');
+    if (textDiv) {
+      textDiv.textContent = cleanText || '（無純文字說明，僅有 Flex 卡片）';
+    }
+  });
+});
+
+function showFlexModal(badgeElement) {
+  const pre = badgeElement.nextElementSibling;
+  if (pre) {
+    if (pre.style.display === 'none') {
+      pre.style.display = 'block';
+      badgeElement.textContent = '🗂️ 收合 Flex 輪播卡片 JSON';
+    } else {
+      pre.style.display = 'none';
+      badgeElement.textContent = '🗂️ 含有 Flex 輪播卡片 (點擊展開 JSON)';
+    }
+  }
 }
 </script>
 {% endblock %}

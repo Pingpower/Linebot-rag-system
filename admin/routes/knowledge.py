@@ -18,6 +18,38 @@ except ImportError:
     BS4_OK = False
 
 def register_knowledge_routes(app):
+    import sys
+    line_bot_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../line_bot'))
+    if line_bot_path not in sys.path:
+        sys.path.append(line_bot_path)
+    
+    try:
+        from semantic_cache import invalidate_semantic_cache_by_text, get_embedding
+    except ImportError:
+        invalidate_semantic_cache_by_text = None
+        get_embedding = None
+
+    def _compute_embedding(title: str, content: str):
+        if not get_embedding:
+            logger.warning("get_embedding is not available. Embedding set to None.")
+            return None
+        try:
+            text_to_embed = f"標題：{title}\n內容：{content}"
+            return get_embedding(text_to_embed)
+        except Exception as e:
+            logger.error(f"Failed to generate embedding in admin backend: {e}")
+            return None
+
+    def _invalidate_cache_for_text(company_id: str, text: str):
+        if not invalidate_semantic_cache_by_text:
+            return
+        try:
+            count = invalidate_semantic_cache_by_text(company_id, text)
+            if count > 0:
+                logger.info(f"Automatically invalidated {count} semantic cache items for company {company_id}")
+        except Exception as e:
+            logger.error(f"Failed to auto-invalidate semantic cache: {e}")
+
     @app.route('/knowledge/export')
     @login_required
     def knowledge_export():
@@ -89,16 +121,20 @@ def register_knowledge_routes(app):
                         tags = item.get('tags', [])
                         
                         if title and content_val:
+                            emb = _compute_embedding(title, content_val)
                             insert_batch.append({
                                 'company_id': company_id,
                                 'title': title,
                                 'content': content_val,
                                 'tags': tags,
+                                'embedding': emb,
                                 'is_active': True
                             })
                     if insert_batch:
                         sb.table('knowledge_base').insert(insert_batch).execute()
                         imported_count = len(insert_batch)
+                        for item in insert_batch:
+                            _invalidate_cache_for_text(company_id, f"{item['title']}\n{item['content']}")
                 except Exception as je:
                     flash(f"JSON 解析失敗: {str(je)}", "error")
                     return redirect(url_for('knowledge', company_id=company_id))
@@ -118,16 +154,20 @@ def register_knowledge_routes(app):
                         
                         tags = [t.strip() for t in tags_str.split(',') if t.strip()] if tags_str else []
                         if title and content_val:
+                            emb = _compute_embedding(title, content_val)
                             insert_batch.append({
                                 'company_id': company_id,
                                 'title': title,
                                 'content': content_val,
                                 'tags': tags,
+                                'embedding': emb,
                                 'is_active': True
                             })
                     if insert_batch:
                         sb.table('knowledge_base').insert(insert_batch).execute()
                         imported_count = len(insert_batch)
+                        for item in insert_batch:
+                            _invalidate_cache_for_text(company_id, f"{item['title']}\n{item['content']}")
                 except Exception as ce:
                     flash(f"CSV 解析或讀取失敗: {str(ce)}", "error")
                     return redirect(url_for('knowledge', company_id=company_id))
@@ -183,8 +223,17 @@ def register_knowledge_routes(app):
             end_page = min(total_pages, page + 2)
             page_range = list(range(start_page, end_page + 1))
             
+        cache_entries = []
+        if selected_id:
+            try:
+                cache_res = sb.table('semantic_cache').select('*').eq('company_id', selected_id).order('id', desc=True).execute()
+                cache_entries = cache_res.data or []
+            except Exception as e_cache:
+                logger.warning(f"Failed to fetch semantic cache: {e_cache}")
+
         return render_template('knowledge.html', companies=companies,
                                selected=selected, entries=entries,
+                               cache_entries=cache_entries,
                                q=q, page=page, total_pages=total_pages, 
                                total_count=total_count, page_range=page_range)
 
@@ -193,23 +242,49 @@ def register_knowledge_routes(app):
     def knowledge_add():
         f = request.form
         tags = [t.strip() for t in f.get('tags', '').split(',') if t.strip()]
+        emb = _compute_embedding(f['title'], f['content'])
         sb.table('knowledge_base').insert({
             'company_id': f['company_id'],
             'title':      f['title'],
             'content':    f['content'],
             'tags':       tags,
+            'embedding':  emb,
             'is_active':  True,
         }).execute()
-        flash('已新增知識條目', 'success')
+        _invalidate_cache_for_text(f['company_id'], f"{f['title']}\n{f['content']}")
+        flash('已新增知識條目，並已自動更新向量與失效關聯快取', 'success')
         return redirect(url_for('knowledge', company_id=f['company_id']))
 
     @app.route('/knowledge/<entry_id>/delete', methods=['POST'])
     @login_required
     def knowledge_delete(entry_id):
-        entry = sb.table('knowledge_base').select('company_id').eq('id', entry_id).single().execute().data
-        sb.table('knowledge_base').delete().eq('id', entry_id).execute()
-        flash('已刪除條目', 'success')
-        return redirect(url_for('knowledge', company_id=entry['company_id']))
+        entry = sb.table('knowledge_base').select('company_id', 'title', 'content').eq('id', entry_id).single().execute().data
+        if entry:
+            sb.table('knowledge_base').delete().eq('id', entry_id).execute()
+            _invalidate_cache_for_text(entry['company_id'], f"{entry.get('title', '')}\n{entry.get('content', '')}")
+            flash('已刪除條目，並已自動失效關聯快取', 'success')
+        else:
+            flash('找不到條目', 'danger')
+        return redirect(url_for('knowledge', company_id=entry['company_id'] if entry else ''))
+
+    @app.route('/knowledge/cache/<cache_id>/delete', methods=['POST'])
+    @login_required
+    def knowledge_cache_delete(cache_id):
+        company_id = request.form.get('company_id')
+        try:
+            # 引入實作的刪除邏輯，同步移除 turbovec 與 supabase 資料
+            # 為保險起見，我們將 line_bot 的路徑加入 sys.path 以便正常匯入 semantic_cache.py
+            import sys
+            line_bot_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../line_bot'))
+            if line_bot_path not in sys.path:
+                sys.path.append(line_bot_path)
+            from semantic_cache import remove_from_cache
+            remove_from_cache(int(cache_id))
+            flash('已刪除語意快取項目', 'success')
+        except Exception as e:
+            logger.error(f"Delete cache failed: {e}")
+            flash(f"刪除快取失敗: {str(e)}", 'danger')
+        return redirect(url_for('knowledge', company_id=company_id))
 
     @app.route('/knowledge/search')
     @login_required
@@ -475,13 +550,24 @@ def register_knowledge_routes(app):
             tags = e.get('tags', [])
             if isinstance(tags, str):
                 tags = [t.strip() for t in tags.split(',') if t.strip()]
+                
+            metadata = {
+                'summary': e.get('summary', '').strip(),
+                'target': e.get('target', '').strip(),
+                'action_text': e.get('action_text', '').strip()
+            }
+            
+            emb = _compute_embedding(e.get('title', '（未命名）'), e.get('content', ''))
             sb.table('knowledge_base').insert({
                 'company_id': company_id,
                 'title':      e.get('title', '（未命名）'),
                 'content':    e.get('content', ''),
                 'tags':       tags,
+                'embedding':  emb,
+                'metadata':   metadata,
                 'is_active':  True,
             }).execute()
+            _invalidate_cache_for_text(company_id, f"{e.get('title', '')}\n{e.get('content', '')}")
             saved += 1
 
         return jsonify({'ok': True, 'saved': saved})

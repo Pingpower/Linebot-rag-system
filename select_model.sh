@@ -74,8 +74,13 @@ GPU_LAYERS=10
 CTX_SIZE=4096
 PARALLEL=1
 
+# 0. 判斷特定優化模型 Mai_Base
+if [[ "$M_NAME_LOWER" =~ "mai_base" ]]; then
+    GPU_LAYERS=99
+    THREADS=6
+    CTX_SIZE=4096
 # 1. 判斷是否為極小模型 (符合關鍵字或檔案大小小於 4.8 GB 即 4915 MB)
-if [[ "$M_NAME_LOWER" =~ "gemma-4" || "$M_NAME_LOWER" =~ "4b" || "$M_NAME_LOWER" =~ "3b" || "$M_NAME_LOWER" =~ "2b" || "$M_NAME_LOWER" =~ "gemma2-2b" || "$M_NAME_LOWER" =~ "nemotron" ]] || [ "$FILE_SIZE_MB" -gt 100 ] && [ "$FILE_SIZE_MB" -lt 4915 ]; then
+elif [[ "$M_NAME_LOWER" =~ "gemma-4" || "$M_NAME_LOWER" =~ "4b" || "$M_NAME_LOWER" =~ "3b" || "$M_NAME_LOWER" =~ "2b" || "$M_NAME_LOWER" =~ "gemma2-2b" || "$M_NAME_LOWER" =~ "nemotron" ]] || [ "$FILE_SIZE_MB" -gt 100 ] && [ "$FILE_SIZE_MB" -lt 4915 ]; then
     GPU_LAYERS=99
     CTX_SIZE=4096
 # 2. 判斷是否為中等模型

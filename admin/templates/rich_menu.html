@@ -13,15 +13,20 @@
       <h3 class="card-title">選擇管理公司</h3>
     </div>
     <div class="form-section">
-      <form method="GET" action="{{ url_for('rich_menu') }}" id="companyForm" class="inline-form">
+      <form method="GET" action="{{ url_for('rich_menu') }}" id="companyForm" class="inline-form" style="display: inline-flex; align-items: center; gap: 12px; width: 100%;">
         <label for="company_select">公司帳號：</label>
-        <select name="company_id" id="company_select" onchange="document.getElementById('companyForm').submit()">
+        <select name="company_id" id="company_select" onchange="document.getElementById('companyForm').submit()" style="flex: 1; max-width: 300px;">
           {% for c in companies %}
             <option value="{{ c.id }}" {% if selected and selected.id == c.id %}selected{% endif %}>
               {{ c.name }} ({{ c.slug }})
             </option>
           {% endfor %}
         </select>
+        {% if selected and selected.line_access_token %}
+          <button type="button" class="btn btn-outline btn-sm" id="btnSync" data-company-id="{{ selected.id }}" style="display: inline-flex; align-items: center; gap: 4px; padding: 8px 12px;">
+            🔄 同步 LINE 選單
+          </button>
+        {% endif %}
       </form>
       
       {% if selected %}
@@ -121,7 +126,7 @@
             <div class="form-group">
               <label for="image"><span class="required">*</span> 選單背景圖片</label>
               <input type="file" id="image" name="image" accept="image/png, image/jpeg" required>
-              <span class="hint">必須符合規格：寬度 1200px、高度 810px，且限制小於 1MB。</span>
+              <span class="hint">必須符合 LINE 官方規格（如大型選單 1200x810、小型選單 1200x405），且限制小於 1MB。</span>
               <div id="image-validation-msg" class="text-red text-sm" style="display:none; margin-top:4px;"></div>
             </div>
 
@@ -134,7 +139,9 @@
               <label for="template_select">選單版型範本</label>
               <select id="template_select">
                 <option value="2x3" selected>2排3格 (最常用 - 6按鈕)</option>
-                <option value="1x3">1排3格 (下排單層 - 3按鈕)</option>
+                <option value="2x2">2排2格 (4按鈕)</option>
+                <option value="1x3">1排3格 (單層 - 3按鈕)</option>
+                <option value="1x2">1排2格 (左右均分 - 2按鈕)</option>
                 <option value="1x1">全幅單格 (1按鈕)</option>
               </select>
             </div>
@@ -383,13 +390,32 @@ document.addEventListener("DOMContentLoaded", function() {
         const w = img.naturalWidth;
         const h = img.naturalHeight;
         
-        // Allowed combinations:
-        // 2500x1686, 2500x843, 1200x810, 1200x405
-        const valid = (w === 1200 && h === 810);
+        // Allowed combinations (LINE Official Specifications)
+        const supportedSizes = [
+          [2500, 1686], [1200, 810], [800, 540], // Full
+          [2500, 843],  [1200, 405], [800, 270]  // Compact
+        ];
+        const isValid = supportedSizes.some(size => size[0] === w && size[1] === h);
                       
-        if (!valid) {
-          showImgError("圖片尺寸不合規範：" + w + "x" + h + "px。請使用寬度 1200px、高度 810px 的圖片。");
+        if (!isValid) {
+          showImgError("圖片尺寸不合 LINE 規範：" + w + "x" + h + "px。建議使用 1200x810 (大型選單) 或 1200x405 (小型選單)。");
           return;
+        }
+        
+        // Smart template switching & disabling logic for Compact size
+        const isCompact = (h === 405 || h === 843 || h === 270);
+        const opt2x3 = templateSelect.querySelector('option[value="2x3"]');
+        const opt2x2 = templateSelect.querySelector('option[value="2x2"]');
+        if (isCompact) {
+          opt2x3.disabled = true;
+          opt2x2.disabled = true;
+          if (templateSelect.value === "2x3" || templateSelect.value === "2x2") {
+            templateSelect.value = "1x3";
+            renderGridAndActions();
+          }
+        } else {
+          opt2x3.disabled = false;
+          opt2x2.disabled = false;
         }
         
         // Success
@@ -421,11 +447,23 @@ document.addEventListener("DOMContentLoaded", function() {
       cols: 3,
       cells: ["A", "B", "C", "D", "E", "F"]
     },
+    "2x2": {
+      name: "2排2格 (4 按鈕)",
+      rows: 2,
+      cols: 2,
+      cells: ["A", "B", "C", "D"]
+    },
     "1x3": {
       name: "1排3格 (3 按鈕)",
       rows: 1,
       cols: 3,
       cells: ["A", "B", "C"]
+    },
+    "1x2": {
+      name: "1排2格 (左右分 - 2 按鈕)",
+      rows: 1,
+      cols: 2,
+      cells: ["A", "B"]
     },
     "1x1": {
       name: "全幅單格 (1 按鈕)",
@@ -696,6 +734,37 @@ document.addEventListener("DOMContentLoaded", function() {
       });
     });
   });
+
+  // Handle Sync button
+  const btnSync = document.getElementById("btnSync");
+  if (btnSync) {
+    btnSync.addEventListener("click", function() {
+      if (!confirm("確定要將本地圖文選單與 LINE 官方伺服器進行同步嗎？\n這將移除本地資料庫中已在 LINE 上不存在的選單，並對齊最新的啟用狀態。")) return;
+      
+      const originalText = this.innerHTML;
+      this.disabled = true;
+      this.innerHTML = "🔄 同步中...";
+      
+      fetch(`/companies/${companyId}/richmenu/sync`, { method: "POST" })
+      .then(res => res.json())
+      .then(data => {
+        if (data.success) {
+          alert(data.msg);
+          window.location.reload();
+        } else {
+          alert("同步失敗：" + data.error);
+          this.disabled = false;
+          this.innerHTML = originalText;
+        }
+      })
+      .catch(err => {
+        console.error(err);
+        alert("操作失敗，網路或伺服器連線錯誤。");
+        this.disabled = false;
+        this.innerHTML = originalText;
+      });
+    });
+  }
 
 });
 </script>

@@ -4,6 +4,7 @@ import json
 import threading
 import subprocess
 import requests as req_lib
+from datetime import datetime, timezone, timedelta
 from flask import render_template, request, jsonify, Response
 
 from config import login_required, logger, get_server_metrics
@@ -13,6 +14,17 @@ from services.model_manager import (
     _is_model_suitable, _is_file_suitable,
     _switch_model_worker, wait_for_llama_vram_clear
 )
+
+def _delete_temp_file_for_task(task_id: str):
+    """Safely delete the temporary file (.tmp) associated with a failed download task."""
+    try:
+        filename = task_id.split('/')[-1]
+        temp_path = os.path.join("/home/pipadmin/文件/models", filename + ".tmp")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+            logger.info({"msg": "Temporary model file removed successfully", "path": temp_path})
+    except Exception as e:
+        logger.error({"msg": "Failed to remove temporary model file", "task_id": task_id, "error": str(e)})
 
 def register_models_routes(app):
     
@@ -71,6 +83,7 @@ def register_models_routes(app):
     @app.route('/api/models/search')
     @login_required
     def api_models_search():
+        import re
         query = request.args.get('q', '').strip()
         sort_by = request.args.get('sort', 'lastModified').strip()
         if sort_by not in ['lastModified', 'downloads', 'likes']:
@@ -86,10 +99,22 @@ def register_models_routes(app):
         except Exception:
             pass  # 無 GPU 或獲取失敗，視為純 CPU 模式
             
+        # 智慧關鍵字分詞提取
+        search_query = query
+        q_parts = []
+        if query:
+            # 拆解成單字與數字部分 (小寫)
+            q_parts = [p.lower() for p in re.findall(r'[a-zA-Z0-9\.]+', query) if p]
+            # 尋找第一個主要英文單字（長度 >= 3 的純英文字母）
+            alpha_parts = [p for p in q_parts if p.isalpha() and len(p) >= 3]
+            if alpha_parts:
+                search_query = alpha_parts[0]
+                logger.info({"msg": "Optimized HF search query", "original": query, "optimized": search_query})
+
         # 擴大拉取數量至 100 名以供後端過濾，並使用 full=true 取得更新時間與檔案列表
         url = f"https://huggingface.co/api/models?sort={sort_by}&direction=-1&limit=100&filter=gguf&full=true"
-        if query:
-            url += f"&search={query}"
+        if search_query:
+            url += f"&search={search_query}"
             
         try:
             resp = req_lib.get(url, timeout=10)
@@ -103,16 +128,34 @@ def register_models_routes(app):
                 likes = m.get('likes', 0)
                 
                 # 1. 排除過於陳舊的模型 (只保留 2024 年之後更新的活躍模型)
-                last_modified_str = m.get('lastModified')
+                raw_date_str = m.get('lastModified') or m.get('createdAt')
                 updated_at = "1970-01-01"
-                if last_modified_str:
+                if raw_date_str:
                     try:
-                        dt = datetime.strptime(last_modified_str[:10], "%Y-%m-%d")
-                        if dt.year < 2024:
-                            continue  # 排除 2024 年之前的過時模型
-                        updated_at = dt.strftime("%Y-%m-%d")
-                    except Exception:
-                        pass
+                        # Parse ISO-8601 string (e.g., 2026-06-16T12:48:20.000Z)
+                        clean_str = raw_date_str.replace('Z', '+00:00')
+                        dt = datetime.fromisoformat(clean_str)
+                        
+                        # Convert to Taipei timezone (UTC+8)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        taipei_tz = timezone(timedelta(hours=8))
+                        dt_taipei = dt.astimezone(taipei_tz)
+                        
+                        if dt_taipei.year < 2024:
+                            continue  # Skip obsolete models before 2024
+                        updated_at = dt_taipei.strftime("%Y-%m-%d")
+                    except Exception as ex:
+                        # Log error with structured logging (Rule #7)
+                        logger.error(
+                            {"model_id": model_id, "raw_date": raw_date_str, "error": str(ex)},
+                            "Failed to parse model updated_at date"
+                        )
+                        # Fallback to basic string slicing
+                        try:
+                            updated_at = raw_date_str[:10]
+                        except Exception:
+                            pass
                 
                 # 2. 解析模型參數大小 (Billion)
                 model_size_b = _get_model_size_billion(model_id)
@@ -126,16 +169,32 @@ def register_models_routes(app):
                 if gguf_count == 0:
                     continue
                 
+                # 4. 本地 Regex 重新評分重新排序 (Rerank)
+                match_score = 0.0
+                if query and q_parts:
+                    model_id_lower = model_id.lower()
+                    for part in q_parts:
+                        if part in model_id_lower:
+                            # 基礎加分
+                            match_score += 10.0
+                            # 核心關鍵特徵加分 (如 35b, moe, mtp 等)
+                            if part in ['moe', 'mtp', 'gguf', 'uncensored'] or (part.endswith('b') and part[:-1].replace('.', '', 1).isdigit()):
+                                match_score += 15.0
+                
                 processed_models.append({
                     'id': model_id,
                     'downloads': downloads,
                     'likes': likes,
                     'suitable': suitable,
                     'updated_at': updated_at,
-                    'gguf_count': gguf_count
+                    'gguf_count': gguf_count,
+                    'match_score': match_score
                 })
                 
-            # 4. 直接保留 Hugging Face API 回傳的排序 (依 sort_by 設定之排序)
+            # 如果有搜尋字詞，優先按 match_score 降序排序，其次按 sort_by 排序
+            if query:
+                processed_models.sort(key=lambda x: (-x['match_score'], -x[sort_by] if sort_by != 'lastModified' else x['id']))
+                
             # 最多只回傳前 25 個精選模型以防頁面過長
             return jsonify(processed_models[:25])
         except Exception as e:
@@ -256,6 +315,11 @@ def register_models_routes(app):
                 del DOWNLOAD_STATUS[task_id]
                 logger.info({"msg": "download task cancelled", "task_id": task_id})
                 return jsonify({'ok': True, 'msg': '已取消下載任務'})
+            
+            # If the task failed, clean up its temporary file
+            if task.get('status') == 'failed':
+                _delete_temp_file_for_task(task_id)
+
             del DOWNLOAD_STATUS[task_id]
             logger.info({"msg": "download task cleared", "task_id": task_id})
             return jsonify({'ok': True, 'msg': '已清除任務'})
@@ -263,6 +327,9 @@ def register_models_routes(app):
         # Clear all finished tasks (completed or failed)
         finished = [k for k, v in DOWNLOAD_STATUS.items() if v.get('status') != 'downloading']
         for k in finished:
+            task = DOWNLOAD_STATUS[k]
+            if task.get('status') == 'failed':
+                _delete_temp_file_for_task(k)
             del DOWNLOAD_STATUS[k]
         logger.info({"msg": "download tasks cleared", "count": len(finished)})
         return jsonify({'ok': True, 'msg': f'已清除 {len(finished)} 筆已完成/失敗任務'})
@@ -318,14 +385,20 @@ def register_models_routes(app):
                 
             # 預設分級
             model_class = "large"
-            if any(kw in m_name_lower for kw in ["gemma-4", "4b", "3b", "2b", "gemma2-2b", "lfm", "a1b", "nemotron"]) or (0.1 <= file_size_gb < 4.8):
+            if "mai_base" in m_name_lower:
+                model_class = "mai_base"
+            elif any(kw in m_name_lower for kw in ["gemma-4", "4b", "3b", "2b", "gemma2-2b", "lfm", "a1b", "nemotron"]) or (0.1 <= file_size_gb < 4.8):
                 model_class = "tiny"
             elif any(kw in m_name_lower for kw in ["8b", "7b", "9b", "gemma2-9b"]):
                 model_class = "medium"
             elif 0.1 <= file_size_gb < 7.5:
                 model_class = "medium"
 
-            if model_class == "tiny":
+            if model_class == "mai_base":
+                threads = 6
+                gpu_layers = 99
+                ctx_size = 4096
+            elif model_class == "tiny":
                 threads = 6
                 gpu_layers = 99
                 ctx_size = 4096

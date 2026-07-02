@@ -204,6 +204,9 @@ def _strip_markdown(text: str) -> str:
     text = re.sub(r'\n{3,}', '\n\n', text)
 
     # Fallback defensive strip: strictly remove any remaining markdown signs
+    text = text.replace("```json", "").replace("```JSON", "").replace("```", "")
+    text = text.replace(",,,json", "").replace(",,,", "")
+    text = text.replace("`", "")
     text = text.replace("**", "").replace("__", "")
     text = text.replace("*", "").replace("_", "")
 
@@ -268,16 +271,42 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
         card_data = None
         main_text = ""
         
-        # 使用不區分大小寫且容許空格的正則來尋找開始與結束標籤
-        start_match = re.search(r'\[FLEX[-_\s]?CARD\]', ai_reply, re.IGNORECASE)
-        if start_match:
-            end_match = re.search(r'\[/FLEX[-_\s]?CARD\]', ai_reply, re.IGNORECASE)
-            if end_match and end_match.start() > start_match.end():
-                card_json_str = ai_reply[start_match.end():end_match.start()].strip()
-                main_text = (ai_reply[:start_match.start()] + "\n" + ai_reply[end_match.end():]).strip()
-            else:
-                card_json_str = ai_reply[start_match.end():].strip()
-                main_text = ai_reply[:start_match.start()].strip()
+        is_pure_json = False
+
+        # ── 優先嘗試：檢查 ai_reply 是否為一個包含 customer_reply 鍵值的結構化純 JSON ──
+        try:
+            s_clean = ai_reply.strip()
+            if s_clean.startswith("```"):
+                s_clean = re.sub(r'^```[a-zA-Z0-9]*\s*', '', s_clean)
+                s_clean = re.sub(r'\s*```$', '', s_clean)
+                s_clean = s_clean.strip()
+            
+            start_idx = s_clean.find('{')
+            end_idx = s_clean.rfind('}')
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                json_candidate = s_clean[start_idx:end_idx+1]
+                parsed = _clean_and_parse_json(json_candidate)
+                if isinstance(parsed, dict) and "customer_reply" in parsed:
+                    main_text = parsed.get("customer_reply", "").strip()
+                    card_data = parsed.get("flex_message")
+                    has_card = True if card_data else False
+                    main_text = _strip_markdown(main_text)
+                    is_pure_json = True
+                    logger.info("Successfully parsed LLM reply as a structured pure JSON object.")
+        except Exception as e_json:
+            logger.debug("Attempt to parse as pure JSON failed, falling back to regex tags: %s", str(e_json))
+
+        # ── 若非純 JSON，退回原本的 regex [FLEX_CARD] 標籤匹配 ──
+        if not is_pure_json:
+            start_match = re.search(r'\[FLEX[-_\s]?CARD\]', ai_reply, re.IGNORECASE)
+            if start_match:
+                end_match = re.search(r'\[/FLEX[-_\s]?CARD\]', ai_reply, re.IGNORECASE)
+                if end_match and end_match.start() > start_match.end():
+                    card_json_str = ai_reply[start_match.end():end_match.start()].strip()
+                    main_text = (ai_reply[:start_match.start()] + "\n" + ai_reply[end_match.end():]).strip()
+                else:
+                    card_json_str = ai_reply[start_match.end():].strip()
+                    main_text = ai_reply[:start_match.start()].strip()
                 
             try:
                 card_data = _clean_and_parse_json(card_json_str)
@@ -398,9 +427,13 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
                     else:
                         # Ensure text matches label for consistent UX
                         # (user sees label on button, text appears in chat when clicked)
+                        if len(label) > 20:
+                            label = label[:17] + "..."
                         btn_text = btn.get('text', '') or ''
                         if not btn_text.strip() or btn_text == '點擊後傳送的文字':
                             btn_text = label
+                        if len(btn_text) > 20:
+                            btn_text = btn_text[:20]
                         action = {
                             "type": "message",
                             "label": label,
@@ -419,7 +452,11 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
                 if not footer_buttons and suggested_buttons:
                     for btn in suggested_buttons:
                         label = btn.get('label', '了解更多')
+                        if len(label) > 20:
+                            label = label[:17] + "..."
                         btn_text = btn.get('text', label)
+                        if len(btn_text) > 20:
+                            btn_text = btn_text[:20]
                         uri = btn.get('uri')
                         btn_action = {}
                         if uri:
@@ -508,7 +545,11 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
                 if suggested_buttons:
                     for btn in suggested_buttons:
                         label = btn.get('label', '了解更多')
+                        if len(label) > 20:
+                            label = label[:17] + "..."
                         btn_text = btn.get('text', label)
+                        if len(btn_text) > 20:
+                            btn_text = btn_text[:20]
                         uri = btn.get('uri')
                         
                         btn_action = {}
@@ -1032,7 +1073,7 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
         if len(docs) >= 2 and len(suggested_buttons) < 3:
             second_title = docs[1]['title']
             if second_title != docs[0]['title']:
-                suggested_buttons.append({"label": f"🔍 {second_title[:12]}", "text": second_title})
+                suggested_buttons.append({"label": f"🔍 {second_title[:12]}", "text": second_title[:20]})
         suggested_buttons = suggested_buttons[:3]
 
     # Always use Push Message (force_push=True) for RAG replies:
@@ -1096,17 +1137,17 @@ def handle_quick_summary_postback(company: dict, user_id: str, query_text: str):
         has_amount = any(kw in combined_content for kw in ['金額', '補助', '元', '津貼', '費用'])
 
         if has_qualifications:
-            buttons.append({"label": "✅ 申請資格", "text": f"{query_text} 申請資格"})
+            buttons.append({"label": "✅ 申請資格", "text": f"{query_text[:10]} 申請資格"})
         if has_docs and len(buttons) < 3:
-            buttons.append({"label": "📄 應備文件", "text": f"{query_text} 應備文件"})
+            buttons.append({"label": "📄 應備文件", "text": f"{query_text[:10]} 應備文件"})
         if has_amount and len(buttons) < 3:
-            buttons.append({"label": "💰 補助金額", "text": f"{query_text} 補助金額"})
+            buttons.append({"label": "💰 補助金額", "text": f"{query_text[:10]} 補助金額"})
 
         # 若衍生按鈕不足，加上第二筆知識庫條目的標題作為探索入口
         if len(docs) >= 2 and len(buttons) < 3:
             second_title = docs[1]['title']
             if second_title != topic_title:
-                buttons.append({"label": f"🔍 {second_title[:10]}", "text": second_title})
+                buttons.append({"label": f"🔍 {second_title[:10]}", "text": second_title[:20]})
 
         # LINE Flex Card 限制：按鈕最多 3 個
         buttons = buttons[:3]
