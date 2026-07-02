@@ -308,13 +308,13 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
                     card_json_str = ai_reply[start_match.end():].strip()
                     main_text = ai_reply[:start_match.start()].strip()
                 
-            try:
-                card_data = _clean_and_parse_json(card_json_str)
-                has_card = True
-                main_text = _strip_markdown(main_text)
-            except Exception as pe:
-                logger.error({"msg": "Failed to parse FLEX_CARD JSON after deep cleanup", "error": str(pe), "json": card_json_str})
-                has_card = False
+                try:
+                    card_data = _clean_and_parse_json(card_json_str)
+                    has_card = True
+                    main_text = _strip_markdown(main_text)
+                except Exception as pe:
+                    logger.error({"msg": "Failed to parse FLEX_CARD JSON after deep cleanup", "error": str(pe), "json": card_json_str})
+                    has_card = False
                 
         if not has_card:
             # 解析失敗或沒有標籤，抹除所有的 [FLEX_CARD] 以防民眾看見
