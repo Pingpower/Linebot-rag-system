@@ -22,6 +22,8 @@
    - 儲存到 Supabase 的歷史紀錄會自動過濾 `[FLEX_CARD]` 內部 JSON 與所有 Markdown `**` 等符號，確保後台對話紀錄的純文字清晰易讀。
 5. **知識庫整理多模型 API 路由支援**：
    - 後台上傳並結構化文檔（萃取知識條目）時，除了支援本地運行模型外，現在也能動態分流至 Google Gemini、NVIDIA NIM 或 OpenRouter 等外部高階 LLM API。極大提升了複雜長文檔在背景切分與整理的成效，且不佔用本地顯存資源。
+6. **AI-Collect 智慧資料蒐集四大功能**：
+   - 後台支援「網址爬取與目錄結構探測分段匯入」、「多格式檔案上傳解析（PDF/Word）」、「線上主題關鍵字搜尋萃取」與「純文字文稿直接整理」等 4 大快速條目產生功能，並支援對話引導按鈕與適用對象之 Metadata 設定。
 
 ---
 
@@ -59,9 +61,10 @@ bash backup_env.sh
 
 ## 完整說明手冊
 
-更詳細的系統部署流程、跨伺服器移植指南、系統微服務管理（Systemd）以及 AI 回答延遲原因的深度分析，請參閱本專案內置的完整手冊：
+更詳細的系統部署流程、管理員手冊、跨伺服器移植指南、系統微服務管理（Systemd）以及 AI 相關機制，請參閱本專案內置的完整手冊：
 
 👉 **[AI 應用系統部署與管理手冊](output/documents/ai_system_manual.md)**
+👉 **[AI 知識條目蒐集架構與操作手冊](output/documents/line_bot_admin_knowledge_manual.md)**
 
 ---
 
@@ -72,7 +75,9 @@ bash backup_env.sh
 ├── line_bot/               # LINE Bot 核心服務與資料庫 Schema
 ├── models/                 # 放置 .gguf 大模型檔案之目錄 (已忽略)
 ├── output/                 # 打包備份與文檔輸出目錄
-│   └── documents/          # 存放 ai_system_manual.md 說明手冊
+│   └── documents/          # 存放說明手冊之目錄
+│       ├── ai_system_manual.md
+│       └── line_bot_admin_knowledge_manual.md
 ├── backup_env.sh           # 專案與設定檔打包備份腳本
 ├── install_services.sh     # 註冊微服務為 Systemd 服務之腳本
 ├── select_model.sh         # 互動式更換模型腳本
