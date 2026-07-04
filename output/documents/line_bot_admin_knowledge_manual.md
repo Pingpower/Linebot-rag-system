@@ -12,24 +12,24 @@
 
 ```mermaid
 graph TD
-    subgraph Frontend [管理後台前端 (Port 8888)]
+    subgraph Frontend ["管理後台前端 (Port 8888)"]
         UI[knowledge.html UI]
         Queue[非同步分段佇列控制器]
         Preview[結果編輯與預覽區]
     end
 
-    subgraph Backend [後台服務與 API]
+    subgraph Backend ["後台服務與 API"]
         Flask[Flask app.py / routes]
         Parser[網頁/檔案解析模組 bs4 / pypdf / docx]
         LLM_Router[LLM 提取路由 services/extractor.py]
     end
 
-    subgraph Databases [資料庫儲存]
+    subgraph Databases ["資料庫儲存"]
         Supabase[(Supabase PostgreSQL)]
         TurboVec[(Turbovec 語意向量庫)]
     end
 
-    subgraph LLM_Providers [LLM 推論引擎]
+    subgraph LLM_Providers ["LLM 推論引擎"]
         LocalLLM[本地 llama-server GGUF]
         Gemini[Google Gemini API]
         NIM[NVIDIA NIM API]
