@@ -6,6 +6,7 @@ import time
 import sys
 import threading
 import ast
+from semantic_cache import check_cache, add_to_cache
 import urllib.parse
 import requests
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
@@ -13,6 +14,7 @@ from fastapi.responses import FileResponse, Response, JSONResponse
 import uvicorn
 from dotenv import load_dotenv
 from openai import OpenAI
+import openai  # for openai.APITimeoutError, openai.APIConnectionError
 from supabase import create_client, Client
 from cachetools import TTLCache
 from linebot.v3 import WebhookHandler
@@ -95,26 +97,8 @@ def get_company(slug: str) -> dict | None:
     return None
 
 
-def get_embedding(text: str) -> list[float] | None:
-    """取得 768 維度的 Gemini embedding"""
-    gemini_key = os.getenv("GEMINI_API_KEY", "")
-    if not gemini_key:
-        logger.error("GEMINI_API_KEY not found in environment.")
-        return None
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={gemini_key}"
-    payload = {
-        "model": "models/text-embedding-004",
-        "content": {"parts": [{"text": text}]}
-    }
-    try:
-        r = requests.post(url, json=payload, timeout=10)
-        if r.status_code == 200:
-            return r.json()['embedding']['values']
-        else:
-            logger.error(f"Gemini API Error: {r.status_code} - {r.text}")
-    except Exception as e:
-        logger.error(f"get_embedding failed: {e}")
-    return None
+# get_embedding is defined in semantic_cache.py — import it to avoid duplication
+from semantic_cache import get_embedding
 
 
 def search_knowledge(company_id: str, query: str, limit: int = 3) -> list[dict]:
@@ -413,7 +397,7 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
                                 if item.get('type') == 'text' and item.get('weight') == 'bold':
                                     alt_title = item.get('text', alt_title)
                                     break
-                        except:
+                        except Exception:
                             pass
                     messages.append(FlexMessage(alt_text=alt_title, contents=flex_container))
                 except Exception as fe:
@@ -885,6 +869,29 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
             reply_text(company, reply_token, "抱歉，影片生成服務目前不可用。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
             return
 
+    # ── 語意快取：查詢是否有高相似度的快取回覆 ──
+    cached_reply = check_cache(company['id'], user_message)
+    if cached_reply:
+        logger.info({"msg": "Semantic cache hit, skipping LLM", "user_msg": user_message[:50]})
+        # 儲存對話記錄（快取命中也要記錄）
+        clean_cached = re.sub(r'\[FLEX_CARD\][\s\S]*?\[/FLEX_CARD\]', '', cached_reply).strip()
+        clean_cached = re.sub(r'\[FLEX_CARD\][\s\S]*', '', clean_cached).strip()
+        clean_cached = _strip_markdown(clean_cached)
+        save_messages(company['id'], user_id, user_message, clean_cached)
+
+        # 回覆 LINE
+        config = Configuration(access_token=company['line_access_token'])
+        with ApiClient(config) as api_client:
+            reply_with_flex_or_text(
+                api_client, reply_token,
+                company.get('name', 'AI 客服助理'),
+                cached_reply,
+                logo_url=company.get('logo_url'),
+                user_id=user_id,
+                force_push=((time.time() - start_time) >= 4.2)
+            )
+        return
+
     # ── 正常 RAG + LLM 對話流程 ──
     # 1. 搜尋知識庫
     docs = search_knowledge(company['id'], user_message)
@@ -1059,16 +1066,28 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
         clean_reply = re.sub(r'\[FLEX_CARD\][\s\S]*?\[/FLEX_CARD\]', '', ai_reply).strip()
         clean_reply = re.sub(r'\[FLEX_CARD\][\s\S]*', '', clean_reply).strip()
         clean_reply = _strip_markdown(clean_reply)
+    except openai.APITimeoutError:
+        logger.error({"msg": "LLM request timeout after 15s"})
+        ai_reply = "抱歉，AI 服務暫時無法使用，請稍後再試。"
+        clean_reply = ai_reply
+    except openai.APIConnectionError as e:
+        logger.error({"msg": "LLM connection failed (local server may be down)", "error": str(e)})
+        ai_reply = "抱歉，AI 服務暫時無法使用，請稍後再試。"
+        clean_reply = ai_reply
     except Exception as e:
-        if "timeout" in str(e).lower():
-            logger.error({"msg": "LLM request timeout after 15s", "error": str(e)})
-        else:
-            logger.error({"msg": "LLM request failed", "error": str(e)})
+        logger.error({"msg": "LLM request failed", "error": str(e)})
         ai_reply = "抱歉，AI 服務暫時無法使用，請稍後再試。"
         clean_reply = ai_reply
 
     # 6. 儲存對話記錄
     save_messages(company['id'], user_id, user_message, clean_reply)
+
+    # 將成功的 LLM 回覆寫入語意快取（供後續相似問題命中）
+    if ai_reply and ai_reply != "抱歉，AI 服務暫時無法使用，請稍後再試。":
+        try:
+            add_to_cache(company['id'], user_message, ai_reply)
+        except Exception as cache_err:
+            logger.warning({"msg": "Failed to add to semantic cache", "error": str(cache_err)})
 
     # 7. 回覆 LINE
     # RAG docs 推薦引導按鈕推導 (作為 AI 沒有主動產出 FLEX_CARD 時的 Fallback 推薦按鈕)

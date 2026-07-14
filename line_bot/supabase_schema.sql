@@ -37,10 +37,11 @@ CREATE TABLE IF NOT EXISTS knowledge_base (
 
 -- 3. 知識庫索引設計 (B-tree for Tenant Isolation & HNSW for Vector Search)
 
--- GIN Index for Full-Text Search (Simple Configuration for En/Zh hybrid)
-CREATE INDEX IF NOT EXISTS knowledge_base_fts_idx
+-- GIN Trigram Index for Chinese-friendly fuzzy text matching
+-- Replaces the original to_tsvector('simple', ...) which doesn't support Chinese tokenization.
+CREATE INDEX IF NOT EXISTS knowledge_base_trgm_idx
     ON knowledge_base
-    USING gin(to_tsvector('simple', title || ' ' || content));
+    USING gin ((title || ' ' || content) gin_trgm_ops);
 
 -- Composite B-tree Index for Tenant Isolation & Status Filtering
 -- Speeds up standard lookups and delete cascades
@@ -48,11 +49,12 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_base_company_active
     ON knowledge_base (company_id, is_active);
 
 -- Partial HNSW Index for Vector Search (Cosine Distance)
--- Uses "WHERE is_active = true" to reduce graph size and memory footprint.
--- Adjust m and ef_construction values based on scale if needed (defaults are m=16, ef_construction=64).
+-- m=16: maximum number of connections per node (higher = better recall, more memory)
+-- ef_construction=64: search width during index construction (higher = better quality, slower build)
 CREATE INDEX IF NOT EXISTS idx_knowledge_base_embedding_hnsw
     ON knowledge_base
     USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64)
     WHERE is_active = true;
 
 
@@ -136,9 +138,11 @@ CREATE INDEX IF NOT EXISTS idx_semantic_cache_company_active
     ON semantic_cache (company_id, is_active);
 
 -- Partial HNSW Index for Fast Semantic Cache Lookup (Cosine Distance)
+-- m=16, ef_construction=64: explicitly set for documentation and future tuning
 CREATE INDEX IF NOT EXISTS idx_semantic_cache_embedding_hnsw
     ON semantic_cache
     USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64)
     WHERE is_active = true;
 
 
@@ -229,7 +233,12 @@ END;
 $$;
 
 
--- RPC: Hybrid Search (Vector + Full-Text Search)
+-- Enable pg_trgm extension for Chinese-friendly fuzzy text matching
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+-- RPC: Hybrid Search (Vector + Trigram Fuzzy Text Match)
+-- Uses pg_trgm instead of to_tsvector for Chinese text support.
+-- RRF constants: vector=60 (standard), trigram=120 (de-emphasized since trigram is less precise).
 CREATE OR REPLACE FUNCTION match_knowledge_hybrid (
   query_embedding vector(768),
   query_text text,
@@ -255,25 +264,26 @@ BEGIN
       AND kb.company_id = company_filter
     LIMIT match_count * 2
   ),
-  fts_matches AS (
+  trgm_matches AS (
     SELECT
       kb.id,
-      ROW_NUMBER() OVER (ORDER BY ts_rank_cd(to_tsvector('simple', kb.title || ' ' || kb.content), plainto_tsquery('simple', query_text)) DESC) as rank
+      ROW_NUMBER() OVER (ORDER BY similarity(kb.title || ' ' || kb.content, query_text) DESC) as rank
     FROM knowledge_base kb
     WHERE kb.is_active = true
       AND kb.company_id = company_filter
-      AND to_tsvector('simple', kb.title || ' ' || kb.content) @@ plainto_tsquery('simple', query_text)
+      AND similarity(kb.title || ' ' || kb.content, query_text) > 0.1
     LIMIT match_count * 2
   )
   SELECT
     kb.id,
     kb.title,
     kb.content,
-    (COALESCE(1.0 / (60 + vm.rank), 0.0) + COALESCE(1.0 / (60 + fm.rank), 0.0))::float AS similarity
+    -- RRF fusion: vector weight k=60 (dominant), trigram weight k=120 (supplementary)
+    (COALESCE(1.0 / (60 + vm.rank), 0.0) + COALESCE(1.0 / (120 + tm.rank), 0.0))::float AS similarity
   FROM knowledge_base kb
   LEFT JOIN vector_matches vm ON kb.id = vm.id
-  LEFT JOIN fts_matches fm ON kb.id = fm.id
-  WHERE (vm.id IS NOT NULL OR fm.id IS NOT NULL)
+  LEFT JOIN trgm_matches tm ON kb.id = tm.id
+  WHERE (vm.id IS NOT NULL OR tm.id IS NOT NULL)
   ORDER BY similarity DESC
   LIMIT match_count;
 END;
