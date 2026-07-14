@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, Response, JSONResponse
 import uvicorn
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import AsyncOpenAI
 import openai  # for openai.APITimeoutError, openai.APIConnectionError
 from supabase import create_client, Client
 from cachetools import TTLCache
@@ -22,8 +22,8 @@ from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.webhook import WebhookParser
 from linebot.v3.messaging import (
     Configuration,
-    ApiClient,
-    MessagingApi,
+    AsyncApiClient,
+    AsyncMessagingApi,
     ReplyMessageRequest,
     PushMessageRequest,
     TextMessage,
@@ -55,8 +55,8 @@ if SUPABASE_URL and SUPABASE_KEY:
 else:
     logger.warning("未設定 SUPABASE_URL 或 SUPABASE_SERVICE_KEY，多租戶功能將停用")
 
-# 本地 LLM 客戶端
-llm_client = OpenAI(
+# 本地 LLM 客戶端 (Async)
+llm_client = AsyncOpenAI(
     base_url="http://127.0.0.1:8080/v1",
     api_key="sk-no-key-required"
 )
@@ -101,14 +101,14 @@ def get_company(slug: str) -> dict | None:
 from semantic_cache import get_embedding
 
 
-def search_knowledge(company_id: str, query: str, limit: int = 3) -> list[dict]:
-    """使用 Supabase 混合檢索（Vector + FTS + RRF 融合評分）"""
+async def search_knowledge(company_id: str, query: str, limit: int = 3) -> list[dict]:
+    """使用 Supabase 混合檢索（Vector + FTS + RRF 融合評分）(非同步)"""
     if not supabase:
         logger.warning("Supabase is not initialized. RAG skipped.")
         return []
     try:
         # 1. 生成 query embedding
-        query_embedding = get_embedding(query)
+        query_embedding = await get_embedding(query)
         if not query_embedding:
             logger.warning("Failed to generate query embedding, returning empty search results.")
             return []
@@ -209,8 +209,8 @@ def _strip_markdown(text: str) -> str:
     return text.strip()
 
 
-def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_reply: str, logo_url: str = None, user_id: str = None, force_push: bool = False, suggested_buttons: list = None):
-    """回覆 LINE 訊息，優先使用精美設計的 Flex Message，支援 [FLEX_CARD] 解析與自訂 Logo，且支援超時自動降級為 Push Message"""
+async def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_reply: str, logo_url: str = None, user_id: str = None, force_push: bool = False, suggested_buttons: list = None):
+    """回覆 LINE 訊息，優先使用精美設計的 Flex Message，支援 [FLEX_CARD] 解析與自訂 Logo，且支援超時自動降級為 Push Message (非同步)"""
     if not ai_reply or not ai_reply.strip():
         ai_reply = "抱歉，我目前無法回答這個問題。"
         
@@ -632,7 +632,7 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
             if use_push:
                 if user_id:
                     logger.info("Using LINE Push Message API instead of reply token.")
-                    MessagingApi(api_client).push_message_with_http_info(
+                    await AsyncMessagingApi(api_client).push_message_with_http_info(
                         PushMessageRequest(
                             to=user_id,
                             messages=messages[:5]
@@ -643,7 +643,7 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
                     logger.error("Push Message requested but user_id is missing.")
             else:
                 try:
-                    MessagingApi(api_client).reply_message_with_http_info(
+                    await AsyncMessagingApi(api_client).reply_message_with_http_info(
                         ReplyMessageRequest(
                             reply_token=reply_token,
                             messages=messages[:5]
@@ -655,7 +655,7 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
                     if "reply token" in err_str.lower() or "400" in err_str:
                         if user_id:
                             logger.info("Reply token failed. Falling back to Push Message.")
-                            MessagingApi(api_client).push_message_with_http_info(
+                            await AsyncMessagingApi(api_client).push_message_with_http_info(
                                 PushMessageRequest(
                                     to=user_id,
                                     messages=messages[:5]
@@ -673,7 +673,7 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
             use_push = force_push or not reply_token
             if use_push:
                 if user_id:
-                    MessagingApi(api_client).push_message_with_http_info(
+                    await AsyncMessagingApi(api_client).push_message_with_http_info(
                         PushMessageRequest(
                             to=user_id,
                             messages=[TextMessage(text=ai_reply)]
@@ -683,7 +683,7 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
                     logger.error("Push fallback requested but user_id is missing.")
             else:
                 try:
-                    MessagingApi(api_client).reply_message_with_http_info(
+                    await AsyncMessagingApi(api_client).reply_message_with_http_info(
                         ReplyMessageRequest(
                             reply_token=reply_token,
                             messages=[TextMessage(text=ai_reply)]
@@ -693,7 +693,7 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
                     err_str = str(e2)
                     if ("reply token" in err_str.lower() or "400" in err_str) and user_id:
                         logger.info("Fallback reply token failed. Falling back to Push Message.")
-                        MessagingApi(api_client).push_message_with_http_info(
+                        await AsyncMessagingApi(api_client).push_message_with_http_info(
                             PushMessageRequest(
                                 to=user_id,
                                 messages=[TextMessage(text=ai_reply)]
@@ -708,14 +708,14 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
 user_last_image = TTLCache(maxsize=1000, ttl=3600)
 user_image_lock = threading.Lock()
 
-def reply_text(company: dict, reply_token: str, text: str, user_id: str = None, force_push: bool = False):
-    """簡便的純文字回覆輔助函數，支援超時降級 Push"""
+async def reply_text(company: dict, reply_token: str, text: str, user_id: str = None, force_push: bool = False):
+    """簡便的純文字回覆輔助函數，支援超時降級 Push (非同步)"""
     try:
         config = Configuration(access_token=company['line_access_token'])
-        with ApiClient(config) as api_client:
+        async with AsyncApiClient(config) as api_client:
             use_push = force_push or not reply_token
             if use_push and user_id:
-                MessagingApi(api_client).push_message_with_http_info(
+                await AsyncMessagingApi(api_client).push_message_with_http_info(
                     PushMessageRequest(
                         to=user_id,
                         messages=[TextMessage(text=text)]
@@ -724,7 +724,7 @@ def reply_text(company: dict, reply_token: str, text: str, user_id: str = None, 
                 logger.info("Pure text LINE Push Message sent successfully!")
             else:
                 try:
-                    MessagingApi(api_client).reply_message_with_http_info(
+                    await AsyncMessagingApi(api_client).reply_message_with_http_info(
                         ReplyMessageRequest(
                             reply_token=reply_token,
                             messages=[TextMessage(text=text)]
@@ -735,7 +735,7 @@ def reply_text(company: dict, reply_token: str, text: str, user_id: str = None, 
                     err_str = str(ex)
                     if ("reply token" in err_str.lower() or "400" in err_str) and user_id:
                         logger.info("Reply token failed (pure text). Falling back to Push Message.")
-                        MessagingApi(api_client).push_message_with_http_info(
+                        await AsyncMessagingApi(api_client).push_message_with_http_info(
                             PushMessageRequest(
                                 to=user_id,
                                 messages=[TextMessage(text=text)]
@@ -748,8 +748,8 @@ def reply_text(company: dict, reply_token: str, text: str, user_id: str = None, 
         logger.error({"msg": "reply_text failed", "error": str(e)})
 
 
-def handle_text_event(company: dict, user_id: str, reply_token: str, user_message: str):
-    """RAG + LLM 推理 + LINE 回覆"""
+async def handle_text_event(company: dict, user_id: str, reply_token: str, user_message: str):
+    """RAG + LLM 推理 + LINE 回覆 (非同步)"""
     start_time = time.time()
     
     # ── 顯示輸入中動畫 ──
@@ -760,8 +760,8 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
     try:
         if company.get('line_access_token') and user_id:
             config = Configuration(access_token=company['line_access_token'])
-            with ApiClient(config) as api_client:
-                MessagingApi(api_client).show_loading_animation(
+            async with AsyncApiClient(config) as api_client:
+                await AsyncMessagingApi(api_client).show_loading_animation(
                     ShowLoadingAnimationRequest(chat_id=user_id, loading_seconds=60)
                 )
     except Exception as le:
@@ -772,7 +772,7 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
     if msg_lower.startswith("/draw ") or msg_lower.startswith("/畫圖 "):
         prompt = user_message[6:].strip()
         if not prompt:
-            reply_text(company, reply_token, "請輸入繪圖提示詞，例如：/draw 一隻戴著墨鏡的貓", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
+            await reply_text(company, reply_token, "請輸入繪圖提示詞，例如：/draw 一隻戴著墨鏡的貓", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
             return
             
         try:
@@ -788,41 +788,41 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
                 
                 use_push = (time.time() - start_time) >= 4.2
                 config = Configuration(access_token=company['line_access_token'])
-                with ApiClient(config) as api_client:
+                async with AsyncApiClient(config) as api_client:
                     msgs = [
                         ImageMessage(original_content_url=img_url, preview_image_url=img_url),
                         TextMessage(text=f"✨ 這是為您生成的圖片！\n指令: {prompt}\n\n💡 提示：輸入「/video」或「/動起來」可以將此圖片轉為短影片喔！")
                     ]
                     if use_push:
-                        MessagingApi(api_client).push_message_with_http_info(
+                        await AsyncMessagingApi(api_client).push_message_with_http_info(
                             PushMessageRequest(to=user_id, messages=msgs)
                         )
                     else:
                         try:
-                            MessagingApi(api_client).reply_message_with_http_info(
+                            await AsyncMessagingApi(api_client).reply_message_with_http_info(
                                 ReplyMessageRequest(reply_token=reply_token, messages=msgs)
                             )
                         except Exception as ex:
                             if "reply token" in str(ex).lower() or "400" in str(ex):
-                                MessagingApi(api_client).push_message_with_http_info(
+                                await AsyncMessagingApi(api_client).push_message_with_http_info(
                                     PushMessageRequest(to=user_id, messages=msgs)
                                 )
                             else:
                                 raise ex
                 return
             else:
-                reply_text(company, reply_token, "抱歉，圖片生成失敗，請稍候重試。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
+                await reply_text(company, reply_token, "抱歉，圖片生成失敗，請稍候重試。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
                 return
         except Exception as e:
             logger.error({"msg": "LINE /draw failed", "error": str(e)})
-            reply_text(company, reply_token, "抱歉，圖片生成服務目前不可用。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
+            await reply_text(company, reply_token, "抱歉，圖片生成服務目前不可用。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
             return
             
     elif msg_lower == "/video" or msg_lower == "/動起來":
         with user_image_lock:
             img_url = user_last_image.get(user_id)
         if not img_url:
-            reply_text(company, reply_token, "您最近沒有生成過圖片喔！請先使用「/draw 您的指令」生成一張圖片。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
+            await reply_text(company, reply_token, "您最近沒有生成過圖片喔！請先使用「/draw 您的指令」生成一張圖片。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
             return
             
         try:
@@ -835,7 +835,7 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
             if video_url:
                 use_push = (time.time() - start_time) >= 4.2
                 config = Configuration(access_token=company['line_access_token'])
-                with ApiClient(config) as api_client:
+                async with AsyncApiClient(config) as api_client:
                     msgs = [
                         VideoMessage(
                             original_content_url=video_url, 
@@ -845,32 +845,32 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
                         TextMessage(text="🎬 您的動態短影片已生成完成！")
                     ]
                     if use_push:
-                        MessagingApi(api_client).push_message_with_http_info(
+                        await AsyncMessagingApi(api_client).push_message_with_http_info(
                             PushMessageRequest(to=user_id, messages=msgs)
                         )
                     else:
                         try:
-                            MessagingApi(api_client).reply_message_with_http_info(
+                            await AsyncMessagingApi(api_client).reply_message_with_http_info(
                                 ReplyMessageRequest(reply_token=reply_token, messages=msgs)
                             )
                         except Exception as ex:
                             if "reply token" in str(ex).lower() or "400" in str(ex):
-                                MessagingApi(api_client).push_message_with_http_info(
+                                await AsyncMessagingApi(api_client).push_message_with_http_info(
                                     PushMessageRequest(to=user_id, messages=msgs)
                                 )
                             else:
                                 raise ex
                 return
             else:
-                reply_text(company, reply_token, "抱歉，影片生成失敗（可能 Hugging Face 佇列擁擠），請稍候重試。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
+                await reply_text(company, reply_token, "抱歉，影片生成失敗（可能 Hugging Face 佇列擁擠），請稍候重試。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
                 return
         except Exception as e:
             logger.error({"msg": "LINE /video failed", "error": str(e)})
-            reply_text(company, reply_token, "抱歉，影片生成服務目前不可用。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
+            await reply_text(company, reply_token, "抱歉，影片生成服務目前不可用。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
             return
 
     # ── 語意快取：查詢是否有高相似度的快取回覆 ──
-    cached_reply = check_cache(company['id'], user_message)
+    cached_reply = await check_cache(company['id'], user_message)
     if cached_reply:
         logger.info({"msg": "Semantic cache hit, skipping LLM", "user_msg": user_message[:50]})
         # 儲存對話記錄（快取命中也要記錄）
@@ -881,8 +881,8 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
 
         # 回覆 LINE
         config = Configuration(access_token=company['line_access_token'])
-        with ApiClient(config) as api_client:
-            reply_with_flex_or_text(
+        async with AsyncApiClient(config) as api_client:
+            await reply_with_flex_or_text(
                 api_client, reply_token,
                 company.get('name', 'AI 客服助理'),
                 cached_reply,
@@ -894,7 +894,7 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
 
     # ── 正常 RAG + LLM 對話流程 ──
     # 1. 搜尋知識庫
-    docs = search_knowledge(company['id'], user_message)
+    docs = await search_knowledge(company['id'], user_message)
 
     # 2. 取得對話歷史
     history = get_history(company['id'], user_id)
@@ -976,8 +976,8 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
 
             # 回覆 LINE
             config = Configuration(access_token=company['line_access_token'])
-            with ApiClient(config) as api_client:
-                reply_with_flex_or_text(api_client, reply_token, company.get('name', 'AI 客服助理'), ai_reply, logo_url=company.get('logo_url'), user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
+            async with AsyncApiClient(config) as api_client:
+                await reply_with_flex_or_text(api_client, reply_token, company.get('name', 'AI 客服助理'), ai_reply, logo_url=company.get('logo_url'), user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
             return
 
         # 如果有匹配到資料，則在 system_prompt 加上極嚴格的安全限制
@@ -1036,7 +1036,7 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
 
     # 5. 呼叫本地 LLM
     try:
-        resp = llm_client.chat.completions.create(
+        resp = await llm_client.chat.completions.create(
             model=LOCAL_LLM_MODEL,
             messages=messages,
             temperature=0.3, # lower temperature for factual RAG matching
@@ -1085,7 +1085,7 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
     # 將成功的 LLM 回覆寫入語意快取（供後續相似問題命中）
     if ai_reply and ai_reply != "抱歉，AI 服務暫時無法使用，請稍後再試。":
         try:
-            add_to_cache(company['id'], user_message, ai_reply)
+            await add_to_cache(company['id'], user_message, ai_reply)
         except Exception as cache_err:
             logger.warning({"msg": "Failed to add to semantic cache", "error": str(cache_err)})
 
@@ -1114,13 +1114,13 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
 
     # Use regular reply logic (force_push=False) and rely on the internal fallback mechanism:
     config = Configuration(access_token=company['line_access_token'])
-    with ApiClient(config) as api_client:
-        reply_with_flex_or_text(api_client, reply_token, company.get('name', 'AI 客服助理'), ai_reply, logo_url=company.get('logo_url'), user_id=user_id, force_push=False, suggested_buttons=suggested_buttons)
+    async with AsyncApiClient(config) as api_client:
+        await reply_with_flex_or_text(api_client, reply_token, company.get('name', 'AI 客服助理'), ai_reply, logo_url=company.get('logo_url'), user_id=user_id, force_push=False, suggested_buttons=suggested_buttons)
 
 
-def handle_quick_summary_postback(company: dict, user_id: str, query_text: str):
+async def handle_quick_summary_postback(company: dict, user_id: str, query_text: str):
     """
-    方案 B+C：針對圖文選單 Postback 的快速摘要回應模式。
+    方案 B+C：針對圖文選單 Postback 的快速摘要回應模式 (非同步)
 
     不跑 LLM（省去 3~10 秒等待），直接:
     1. 用 RAG 搜尋出最相關的 1~3 筆知識庫條目
@@ -1130,16 +1130,16 @@ def handle_quick_summary_postback(company: dict, user_id: str, query_text: str):
     用戶點按鈕後才觸發完整 LLM 詳細回答 (handle_text_event)。
     整體回應時間 < 1.5 秒。
     """
-    docs = search_knowledge(company['id'], query_text, limit=4)
+    docs = await search_knowledge(company['id'], query_text, limit=4)
 
     config = Configuration(access_token=company['line_access_token'])
-    with ApiClient(config) as api_client:
-        api = MessagingApi(api_client)
+    async with AsyncApiClient(config) as api_client:
+        api = AsyncMessagingApi(api_client)
 
         if not docs:
             # 知識庫無資料，fallback 到完整 LLM 流程
             logger.info("Quick summary: no RAG docs found, falling back to LLM for: %s", query_text)
-            handle_text_event(company, user_id, None, query_text)
+            await handle_text_event(company, user_id, None, query_text)
             return
 
         # ── 組裝摘要卡 ──
@@ -1251,18 +1251,18 @@ def handle_quick_summary_postback(company: dict, user_id: str, query_text: str):
         flex_msg = FlexMessage(alt_text=f"📋 {topic_title} 快速摘要", contents=flex_container)
 
         try:
-            api.push_message_with_http_info(
+            await api.push_message_with_http_info(
                 PushMessageRequest(to=user_id, messages=[flex_msg])
             )
             logger.info("Quick summary card sent for query: %s", query_text)
         except Exception as e:
             logger.error("Failed to send quick summary card: %s", str(e))
             # Fallback 到完整 LLM 流程
-            handle_text_event(company, user_id, None, query_text)
+            await handle_text_event(company, user_id, None, query_text)
 
 
-def handle_postback_event(company: dict, user_id: str, reply_token: str, postback_data: str):
-    """處理 LINE Postback 事件（圖文選單連動智慧客服）"""
+async def handle_postback_event(company: dict, user_id: str, reply_token: str, postback_data: str):
+    """處理 LINE Postback 事件（圖文選單連動智慧客服） (非同步)"""
     logger.info(f"Received Postback data: {postback_data} for user: {user_id}")
     
     try:
@@ -1278,17 +1278,17 @@ def handle_postback_event(company: dict, user_id: str, reply_token: str, postbac
         query_text = params.get('text', [''])[0]
         if query_text:
             logger.info("Quick summary postback for: '%s'", query_text)
-            handle_quick_summary_postback(company, user_id, query_text)
+            await handle_quick_summary_postback(company, user_id, query_text)
             return
             
     # 備用連動：若不含特定的 action，但 data 整串是有意義的非空文字
     if postback_data and not action:
         logger.info("Quick summary via raw postback data: '%s'", postback_data)
-        handle_quick_summary_postback(company, user_id, postback_data)
+        await handle_quick_summary_postback(company, user_id, postback_data)
         return
         
-    # 其他未定義 postback 動作的預設回覆
-    reply_text(company, reply_token, "已收到選單按鈕指令。", user_id=user_id)
+    # 其他未定義 postback 動作 of 預設回覆
+    await reply_text(company, reply_token, "已收到選單按鈕指令。", user_id=user_id)
 
 
 

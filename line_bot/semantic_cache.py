@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-import requests as req_lib
+import httpx
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
@@ -15,8 +15,8 @@ sb_client: Client | None = None
 if SUPABASE_URL and SUPABASE_KEY:
     sb_client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def get_embedding(text: str) -> list[float] | None:
-    """取得 768 維度的 Gemini embedding"""
+async def get_embedding(text: str) -> list[float] | None:
+    """取得 768 維度的 Gemini embedding (非同步)"""
     gemini_key = os.getenv("GEMINI_API_KEY", "")
     if not gemini_key:
         logger.error("Semantic Cache: GEMINI_API_KEY not found in environment.")
@@ -27,7 +27,8 @@ def get_embedding(text: str) -> list[float] | None:
         "content": {"parts": [{"text": text}]}
     }
     try:
-        r = req_lib.post(url, json=payload, timeout=10)
+        async with httpx.AsyncClient() as client:
+            r = await client.post(url, json=payload, timeout=10.0)
         if r.status_code == 200:
             return r.json()['embedding']['values']
         else:
@@ -36,14 +37,14 @@ def get_embedding(text: str) -> list[float] | None:
         logger.error(f"Semantic Cache: get_embedding failed: {e}")
     return None
 
-def check_cache(company_id: str, query_text: str, threshold: float = 0.92) -> str | None:
+async def check_cache(company_id: str, query_text: str, threshold: float = 0.92) -> str | None:
     """
-    檢查是否有高相似度的語意快取答案 (使用 Supabase pgvector)
+    檢查是否有高相似度的語意快取答案 (使用 Supabase pgvector) (非同步)
     """
     if not sb_client:
         return None
         
-    q_emb = get_embedding(query_text)
+    q_emb = await get_embedding(query_text)
     if not q_emb or len(q_emb) != 768:
         return None
         
@@ -77,12 +78,12 @@ def check_cache(company_id: str, query_text: str, threshold: float = 0.92) -> st
             
     return None
 
-def add_to_cache(company_id: str, query_text: str, reply_data: str) -> bool:
-    """將新的問答對象新增到 Supabase 語意快取中"""
+async def add_to_cache(company_id: str, query_text: str, reply_data: str) -> bool:
+    """將新的問答對象新增到 Supabase 語意快取中 (非同步)"""
     if not sb_client:
         return False
         
-    q_emb = get_embedding(query_text)
+    q_emb = await get_embedding(query_text)
     if not q_emb or len(q_emb) != 768:
         return False
         
@@ -100,8 +101,8 @@ def add_to_cache(company_id: str, query_text: str, reply_data: str) -> bool:
         logger.error(f"Failed to insert cache metadata into Supabase: {e}")
         return False
 
-def remove_from_cache(cache_id: str) -> bool:
-    """從快取庫中移除特定 ID"""
+async def remove_from_cache(cache_id: str) -> bool:
+    """從快取庫中移除特定 ID (非同步)"""
     if not sb_client:
         return False
         
@@ -113,15 +114,15 @@ def remove_from_cache(cache_id: str) -> bool:
         logger.error(f"Failed to delete cache {cache_id} from Supabase: {e}")
         return False
 
-def invalidate_semantic_cache_by_text(company_id: str, text: str, threshold: float = 0.85) -> int:
+async def invalidate_semantic_cache_by_text(company_id: str, text: str, threshold: float = 0.85) -> int:
     """
     根據給定文字，搜尋語意相似的快取項目並將其設為無效（is_active = False）。
-    回傳被標記無效的快取數量。
+    回傳被標記無效的快取數量 (非同步)。
     """
     if not sb_client or not text or not text.strip():
         return 0
         
-    q_emb = get_embedding(text)
+    q_emb = await get_embedding(text)
     if not q_emb or len(q_emb) != 768:
         return 0
         
