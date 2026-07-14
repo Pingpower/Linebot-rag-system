@@ -10,6 +10,7 @@ from semantic_cache import check_cache, add_to_cache
 import urllib.parse
 import requests
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from starlette.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, Response, JSONResponse
 import uvicorn
 from dotenv import load_dotenv
@@ -115,15 +116,17 @@ async def search_knowledge(company_id: str, query: str, limit: int = 3) -> list[
             
         # 2. 呼叫 supabase RPC "match_knowledge_hybrid"
         # 參數: query_embedding, query_text, match_count, company_filter
-        res = supabase.rpc(
-            'match_knowledge_hybrid',
-            {
-                'query_embedding': query_embedding,
-                'query_text': query,
-                'match_count': limit,
-                'company_filter': company_id
-            }
-        ).execute()
+        def _do_rpc():
+            return supabase.rpc(
+                'match_knowledge_hybrid',
+                {
+                    'query_embedding': query_embedding,
+                    'query_text': query,
+                    'match_count': limit,
+                    'company_filter': company_id
+                }
+            ).execute()
+        res = await run_in_threadpool(_do_rpc)
         
         docs = res.data or []
         logger.info(f"Hybrid RAG search found {len(docs)} documents.")
@@ -877,7 +880,7 @@ async def handle_text_event(company: dict, user_id: str, reply_token: str, user_
         clean_cached = re.sub(r'\[FLEX_CARD\][\s\S]*?\[/FLEX_CARD\]', '', cached_reply).strip()
         clean_cached = re.sub(r'\[FLEX_CARD\][\s\S]*', '', clean_cached).strip()
         clean_cached = _strip_markdown(clean_cached)
-        save_messages(company['id'], user_id, user_message, clean_cached)
+        await run_in_threadpool(save_messages, company['id'], user_id, user_message, clean_cached)
 
         # 回覆 LINE
         config = Configuration(access_token=company['line_access_token'])
@@ -897,7 +900,7 @@ async def handle_text_event(company: dict, user_id: str, reply_token: str, user_
     docs = await search_knowledge(company['id'], user_message)
 
     # 2. 取得對話歷史
-    history = get_history(company['id'], user_id)
+    history = await run_in_threadpool(get_history, company['id'], user_id)
 
     # 3. 組合 system prompt 與檢查是否為 Strict RAG 模式
     original_prompt = company.get('system_prompt', '你是一個友善、專業的 AI 客服助理。')
@@ -912,7 +915,9 @@ async def handle_text_event(company: dict, user_id: str, reply_token: str, user_
     # 3.1 載入自訂圖文資產/圖示以供 AI 動態輸出 FLEX_CARD
     assets = []
     try:
-        assets_res = supabase.table('company_assets').select('*').eq('company_id', company['id']).execute()
+        def _do_select_assets():
+            return supabase.table('company_assets').select('*').eq('company_id', company['id']).execute()
+        assets_res = await run_in_threadpool(_do_select_assets)
         assets = assets_res.data or []
     except Exception as e:
         logger.warning({"msg": "Failed to fetch company assets", "error": str(e)})
@@ -972,7 +977,7 @@ async def handle_text_event(company: dict, user_id: str, reply_token: str, user_
         # 在 Strict RAG 模式下，如果 docs 為空（即知識庫沒有匹配到任何資料），直接拒絕回答，不呼叫 LLM 節省資源！
         if not docs:
             ai_reply = "抱歉，在我的知識庫中找不到與此問題相關的資訊。"
-            save_messages(company['id'], user_id, user_message, ai_reply)
+            await run_in_threadpool(save_messages, company['id'], user_id, user_message, ai_reply)
 
             # 回覆 LINE
             config = Configuration(access_token=company['line_access_token'])
@@ -1080,7 +1085,7 @@ async def handle_text_event(company: dict, user_id: str, reply_token: str, user_
         clean_reply = ai_reply
 
     # 6. 儲存對話記錄
-    save_messages(company['id'], user_id, user_message, clean_reply)
+    await run_in_threadpool(save_messages, company['id'], user_id, user_message, clean_reply)
 
     # 將成功的 LLM 回覆寫入語意快取（供後續相似問題命中）
     if ai_reply and ai_reply != "抱歉，AI 服務暫時無法使用，請稍後再試。":
@@ -1303,7 +1308,7 @@ async def callback(company_slug: str, request: Request, background_tasks: Backgr
       https://lmbot.pingpower.com.tw/callback/{company_slug}
     """
     # 1. 查詢公司設定
-    company = get_company(company_slug)
+    company = await run_in_threadpool(get_company, company_slug)
     if not company:
         logger.warning({"msg": "Unknown slug", "slug": company_slug})
         raise HTTPException(status_code=404, detail="Company not found")

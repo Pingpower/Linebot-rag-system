@@ -49,12 +49,17 @@ async def check_cache(company_id: str, query_text: str, threshold: float = 0.92)
         return None
         
     try:
-        res = sb_client.rpc('match_semantic_cache', {
-            'query_embedding': q_emb,
-            'match_threshold': threshold,
-            'match_count': 1,
-            'company_filter': company_id
-        }).execute()
+        from starlette.concurrency import run_in_threadpool
+        
+        def _do_rpc():
+            return sb_client.rpc('match_semantic_cache', {
+                'query_embedding': q_emb,
+                'match_threshold': threshold,
+                'match_count': 1,
+                'company_filter': company_id
+            }).execute()
+            
+        res = await run_in_threadpool(_do_rpc)
         
         if res.data and len(res.data) > 0:
             matched = res.data[0]
@@ -67,7 +72,9 @@ async def check_cache(company_id: str, query_text: str, threshold: float = 0.92)
             if ",,," in reply_data or ", , ," in reply_data:
                 logger.warning(f"Semantic Cache contains faulty markers (,,,), invalidating ID {matched_id}")
                 try:
-                    sb_client.table('semantic_cache').update({'is_active': False}).eq('id', matched_id).execute()
+                    def _do_update():
+                        return sb_client.table('semantic_cache').update({'is_active': False}).eq('id', matched_id).execute()
+                    await run_in_threadpool(_do_update)
                 except Exception as e_upd:
                     logger.error(f"Failed to invalidate faulty cache ID {matched_id}: {e_upd}")
                 return None
@@ -88,13 +95,16 @@ async def add_to_cache(company_id: str, query_text: str, reply_data: str) -> boo
         return False
         
     try:
-        sb_client.table('semantic_cache').insert({
-            'company_id': company_id,
-            'query_text': query_text,
-            'reply_data': reply_data,
-            'embedding': q_emb,
-            'is_active': True
-        }).execute()
+        from starlette.concurrency import run_in_threadpool
+        def _do_insert():
+            return sb_client.table('semantic_cache').insert({
+                'company_id': company_id,
+                'query_text': query_text,
+                'reply_data': reply_data,
+                'embedding': q_emb,
+                'is_active': True
+            }).execute()
+        await run_in_threadpool(_do_insert)
         logger.info(f"Successfully added query '{query_text}' to Semantic Cache in Supabase.")
         return True
     except Exception as e:
@@ -107,7 +117,10 @@ async def remove_from_cache(cache_id: str) -> bool:
         return False
         
     try:
-        sb_client.table('semantic_cache').delete().eq('id', cache_id).execute()
+        from starlette.concurrency import run_in_threadpool
+        def _do_delete():
+            return sb_client.table('semantic_cache').delete().eq('id', cache_id).execute()
+        await run_in_threadpool(_do_delete)
         logger.info(f"Successfully removed ID {cache_id} from Semantic Cache.")
         return True
     except Exception as e:
@@ -127,12 +140,15 @@ async def invalidate_semantic_cache_by_text(company_id: str, text: str, threshol
         return 0
         
     try:
-        res = sb_client.rpc('match_semantic_cache', {
-            'query_embedding': q_emb,
-            'match_threshold': threshold,
-            'match_count': 10,
-            'company_filter': company_id
-        }).execute()
+        from starlette.concurrency import run_in_threadpool
+        def _do_rpc():
+            return sb_client.rpc('match_semantic_cache', {
+                'query_embedding': q_emb,
+                'match_threshold': threshold,
+                'match_count': 10,
+                'company_filter': company_id
+            }).execute()
+        res = await run_in_threadpool(_do_rpc)
         
         if not res.data:
             return 0
@@ -142,7 +158,9 @@ async def invalidate_semantic_cache_by_text(company_id: str, text: str, threshol
             matched_id = matched['id']
             score = matched['similarity']
             try:
-                upd_res = sb_client.table('semantic_cache').update({'is_active': False}).eq('id', matched_id).eq('company_id', company_id).execute()
+                def _do_update_invalid():
+                    return sb_client.table('semantic_cache').update({'is_active': False}).eq('id', matched_id).eq('company_id', company_id).execute()
+                upd_res = await run_in_threadpool(_do_update_invalid)
                 if upd_res.data:
                     logger.info(f"Invalidated Semantic Cache ID {matched_id} (Score: {score:.4f}) due to update in knowledge base.")
                     invalidated_count += 1
