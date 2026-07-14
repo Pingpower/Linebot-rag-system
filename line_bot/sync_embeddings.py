@@ -22,10 +22,10 @@ if not GEMINI_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def get_embedding(text: str) -> list[float] | None:
-    """Get 3072-dimension embedding using Gemini's gemini-embedding-2 model"""
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-embedding-2:embedContent?key={GEMINI_KEY}"
+    """Get 768-dimension embedding using Gemini's text-embedding-004 model"""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={GEMINI_KEY}"
     payload = {
-        "model": "models/gemini-embedding-2",
+        "model": "models/text-embedding-004",
         "content": {"parts": [{"text": text}]}
     }
     try:
@@ -56,8 +56,8 @@ def main():
         content = row.get('content', '')
         current_embedding = row.get('embedding')
         
-        # Check if already has valid embedding (length 3072)
-        if current_embedding and len(current_embedding) == 3072:
+        # Check if already has valid embedding (length 768)
+        if current_embedding and len(current_embedding) == 768:
             print(f"Skipping row {row_id} ('{title}'): Already has a valid embedding.")
             continue
             

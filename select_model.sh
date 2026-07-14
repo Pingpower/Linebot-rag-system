@@ -72,7 +72,7 @@ FILE_SIZE_MB=$(( FILE_SIZE_BYTES / 1048576 ))
 THREADS=6
 GPU_LAYERS=10
 CTX_SIZE=4096
-PARALLEL=1
+PARALLEL=2
 
 # 0. 判斷特定優化模型 Mai_Base
 if [[ "$M_NAME_LOWER" =~ "mai_base" ]]; then
@@ -100,7 +100,9 @@ if [[ "$M_NAME_LOWER" =~ "moe" || "$M_NAME_LOWER" =~ "a3b" || "$M_NAME_LOWER" =~
 fi
 EXTRA_ARGS+=("--no-mmap")
 EXTRA_ARGS+=("--mlock")
-EXTRA_ARGS+=("--flash-attn on")
+EXTRA_ARGS+=("--flash-attn")
+EXTRA_ARGS+=("--cache-type-k q8_0")
+EXTRA_ARGS+=("--cache-type-v q8_0")
 EXTRA_STR="${EXTRA_ARGS[*]}"
 
 # 更新 systemd 服務 ExecStart 的模型路徑與優化參數
@@ -115,17 +117,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$WORKSPACE
-ExecStart=$LLAMA_BIN \\
-    --model $SELECTED \\
-    --host 127.0.0.1 \\
-    --port 8080 \\
-    --ctx-size $CTX_SIZE \\
-    --n-gpu-layers $GPU_LAYERS \\
-    --threads $THREADS \\
-    --threads-batch $THREADS \\
-    --parallel $PARALLEL \\
-    $EXTRA_STR \\
-    --log-disable
+ExecStart=$LLAMA_BIN --model $SELECTED --host 127.0.0.1 --port 8080 --ctx-size $CTX_SIZE --n-gpu-layers $GPU_LAYERS --threads $THREADS --threads-batch $THREADS --parallel $PARALLEL $EXTRA_STR --log-disable
 Restart=always
 RestartSec=10
 StandardOutput=append:$WORKSPACE/llama.log

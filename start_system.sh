@@ -134,7 +134,7 @@ trap cleanup SIGINT SIGTERM
 watchdog_llama() {
     while true; do
         echo -e "\e[1;34m[Watchdog] 啟動 Llama-server...\e[0m"
-        $LLAMA_SERVER -m "$SELECTED_MODEL" --n-cpu-moe 36 --no-mmap --cache-type-k q4_0 --cache-type-v q4_0 -c 8192 --host 0.0.0.0 --port 8080 -ngl 15 > "$WORKSPACE_DIR/llama.log" 2>&1 &
+        $LLAMA_SERVER -m "$SELECTED_MODEL" --host 0.0.0.0 --port 8080 --ctx-size 8192 --n-gpu-layers 99 --threads 6 --threads-batch 6 --parallel 2 --cache-type-k q8_0 --cache-type-v q8_0 --no-mmap --mlock --flash-attn > "$WORKSPACE_DIR/llama.log" 2>&1 &
         PID_LLAMA=$!
         wait $PID_LLAMA
         echo -e "\e[1;31m[Watchdog] Llama-server 異常關閉，3秒後重啟...\e[0m"

@@ -2,13 +2,22 @@ import os
 import re
 import json
 import logging
-from flask import Flask, request, abort, send_from_directory
+import time
+import sys
+import threading
+import ast
+import urllib.parse
+import requests
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi.responses import FileResponse, Response, JSONResponse
+import uvicorn
 from dotenv import load_dotenv
 from openai import OpenAI
 from supabase import create_client, Client
 from cachetools import TTLCache
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
+from linebot.v3.webhook import WebhookParser
 from linebot.v3.messaging import (
     Configuration,
     ApiClient,
@@ -31,7 +40,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+app = FastAPI(title="LM Bot API")
 
 # Supabase 連線（使用 service_role key 才能繞過 RLS）
 SUPABASE_URL = os.getenv('SUPABASE_URL', '')
@@ -49,9 +58,11 @@ llm_client = OpenAI(
     base_url="http://127.0.0.1:8080/v1",
     api_key="sk-no-key-required"
 )
+LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "local-model")
 
 # 公司設定快取（TTL = 5 分鐘，避免每次請求都查 DB）
 company_cache: TTLCache = TTLCache(maxsize=100, ttl=300)
+company_cache_lock = threading.Lock()
 
 # ============================================
 # Supabase Helper Functions
@@ -59,8 +70,9 @@ company_cache: TTLCache = TTLCache(maxsize=100, ttl=300)
 
 def get_company(slug: str) -> dict | None:
     """從 Supabase 取得公司設定（含快取）"""
-    if slug in company_cache:
-        return company_cache[slug]
+    with company_cache_lock:
+        if slug in company_cache:
+            return company_cache[slug]
 
     if not supabase:
         return None
@@ -75,7 +87,8 @@ def get_company(slug: str) -> dict | None:
             .execute()
         )
         if result.data:
-            company_cache[slug] = result.data
+            with company_cache_lock:
+                company_cache[slug] = result.data
             return result.data
     except Exception as e:
         logger.error({"msg": "get_company failed", "slug": slug, "error": str(e)})
@@ -83,18 +96,17 @@ def get_company(slug: str) -> dict | None:
 
 
 def get_embedding(text: str) -> list[float] | None:
-    """取得 3072 維度的 Gemini embedding"""
+    """取得 768 維度的 Gemini embedding"""
     gemini_key = os.getenv("GEMINI_API_KEY", "")
     if not gemini_key:
         logger.error("GEMINI_API_KEY not found in environment.")
         return None
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-embedding-2:embedContent?key={gemini_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={gemini_key}"
     payload = {
-        "model": "models/gemini-embedding-2",
+        "model": "models/text-embedding-004",
         "content": {"parts": [{"text": text}]}
     }
     try:
-        import requests
         r = requests.post(url, json=payload, timeout=10)
         if r.status_code == 200:
             return r.json()['embedding']['values']
@@ -238,7 +250,6 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
         return "".join(result)
 
     def _clean_and_parse_json(raw_str: str):
-        import ast
         s = raw_str.strip()
         if "```" in s:
             s = re.sub(r'^```[a-zA-Z0-9]*\s*', '', s)
@@ -710,7 +721,8 @@ def reply_with_flex_or_text(api_client, reply_token: str, company_name: str, ai_
             logger.error({"msg": "Final fallback reply/push failed", "error": str(final_ex)})
 
 # 用戶最後生成的圖片 URL 記錄，便於一鍵轉影片
-user_last_image = {}
+user_last_image = TTLCache(maxsize=1000, ttl=3600)
+user_image_lock = threading.Lock()
 
 def reply_text(company: dict, reply_token: str, text: str, user_id: str = None, force_push: bool = False):
     """簡便的純文字回覆輔助函數，支援超時降級 Push"""
@@ -754,7 +766,6 @@ def reply_text(company: dict, reply_token: str, text: str, user_id: str = None, 
 
 def handle_text_event(company: dict, user_id: str, reply_token: str, user_message: str):
     """RAG + LLM 推理 + LINE 回覆"""
-    import time
     start_time = time.time()
     
     # ── 顯示輸入中動畫 ──
@@ -781,14 +792,15 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
             return
             
         try:
-            import sys
-            if "/home/pipadmin/文件" not in sys.path:
-                sys.path.append("/home/pipadmin/文件")
+            parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if parent_dir not in sys.path:
+                sys.path.append(parent_dir)
             from admin.hf_api import generate_image
             
             img_url = generate_image(prompt)
             if img_url:
-                user_last_image[user_id] = img_url
+                with user_image_lock:
+                    user_last_image[user_id] = img_url
                 
                 use_push = (time.time() - start_time) >= 4.2
                 config = Configuration(access_token=company['line_access_token'])
@@ -823,15 +835,16 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
             return
             
     elif msg_lower == "/video" or msg_lower == "/動起來":
-        img_url = user_last_image.get(user_id)
+        with user_image_lock:
+            img_url = user_last_image.get(user_id)
         if not img_url:
             reply_text(company, reply_token, "您最近沒有生成過圖片喔！請先使用「/draw 您的指令」生成一張圖片。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
             return
             
         try:
-            import sys
-            if "/home/pipadmin/文件" not in sys.path:
-                sys.path.append("/home/pipadmin/文件")
+            parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if parent_dir not in sys.path:
+                sys.path.append(parent_dir)
             from admin.hf_api import generate_video
             
             video_url = generate_video(img_url)
@@ -1017,10 +1030,11 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
     # 5. 呼叫本地 LLM
     try:
         resp = llm_client.chat.completions.create(
-            model="local-model",
+            model=LOCAL_LLM_MODEL,
             messages=messages,
             temperature=0.3, # lower temperature for factual RAG matching
-            max_tokens=1024  # Increased to 1024 to allow full RAG reasoning and complete responses without truncation
+            max_tokens=1024,  # Increased to 1024 to allow full RAG reasoning and complete responses without truncation
+            timeout=15.0
         )
         ai_reply = resp.choices[0].message.content
 
@@ -1046,7 +1060,10 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
         clean_reply = re.sub(r'\[FLEX_CARD\][\s\S]*', '', clean_reply).strip()
         clean_reply = _strip_markdown(clean_reply)
     except Exception as e:
-        logger.error({"msg": "LLM request failed", "error": str(e)})
+        if "timeout" in str(e).lower():
+            logger.error({"msg": "LLM request timeout after 15s", "error": str(e)})
+        else:
+            logger.error({"msg": "LLM request failed", "error": str(e)})
         ai_reply = "抱歉，AI 服務暫時無法使用，請稍後再試。"
         clean_reply = ai_reply
 
@@ -1076,14 +1093,10 @@ def handle_text_event(company: dict, user_id: str, reply_token: str, user_messag
                 suggested_buttons.append({"label": f"🔍 {second_title[:12]}", "text": second_title[:20]})
         suggested_buttons = suggested_buttons[:3]
 
-    # Always use Push Message (force_push=True) for RAG replies:
-    # - handle_text_event runs in a background thread, reply_token expires in ~5 seconds.
-    # - RAG + LLM typically takes 3-10+ seconds, making Reply Token almost always expired.
-    # - Switching from Reply to Push mid-response causes a noticeable delay and may leave
-    #   the loading animation stuck. Push Message is reliable and consistent.
+    # Use regular reply logic (force_push=False) and rely on the internal fallback mechanism:
     config = Configuration(access_token=company['line_access_token'])
     with ApiClient(config) as api_client:
-        reply_with_flex_or_text(api_client, reply_token, company.get('name', 'AI 客服助理'), ai_reply, logo_url=company.get('logo_url'), user_id=user_id, force_push=True, suggested_buttons=suggested_buttons)
+        reply_with_flex_or_text(api_client, reply_token, company.get('name', 'AI 客服助理'), ai_reply, logo_url=company.get('logo_url'), user_id=user_id, force_push=False, suggested_buttons=suggested_buttons)
 
 
 def handle_quick_summary_postback(company: dict, user_id: str, query_text: str):
@@ -1098,8 +1111,6 @@ def handle_quick_summary_postback(company: dict, user_id: str, query_text: str):
     用戶點按鈕後才觸發完整 LLM 詳細回答 (handle_text_event)。
     整體回應時間 < 1.5 秒。
     """
-    import requests as req_lib
-
     docs = search_knowledge(company['id'], query_text, limit=4)
 
     config = Configuration(access_token=company['line_access_token'])
@@ -1233,7 +1244,6 @@ def handle_quick_summary_postback(company: dict, user_id: str, query_text: str):
 
 def handle_postback_event(company: dict, user_id: str, reply_token: str, postback_data: str):
     """處理 LINE Postback 事件（圖文選單連動智慧客服）"""
-    import urllib.parse
     logger.info(f"Received Postback data: {postback_data} for user: {user_id}")
     
     try:
@@ -1267,8 +1277,8 @@ def handle_postback_event(company: dict, user_id: str, reply_token: str, postbac
 # 路由：多租戶 Webhook 入口（單一路由，乾淨正確）
 # ============================================
 
-@app.route("/callback/<company_slug>", methods=['POST'])
-def callback(company_slug: str):
+@app.post("/callback/{company_slug}")
+async def callback(company_slug: str, request: Request, background_tasks: BackgroundTasks):
     """
     每間公司擁有獨立的 Webhook URL：
       https://lmbot.pingpower.com.tw/callback/{company_slug}
@@ -1277,71 +1287,73 @@ def callback(company_slug: str):
     company = get_company(company_slug)
     if not company:
         logger.warning({"msg": "Unknown slug", "slug": company_slug})
-        abort(404)
+        raise HTTPException(status_code=404, detail="Company not found")
 
-    # 2. 驗證 LINE 簽名（使用該公司的 channel secret）
+    # 2. 驗證 LINE 簽名並解析事件（使用該公司的 channel secret 與 WebhookParser）
     signature = request.headers.get('X-Line-Signature', '')
-    body = request.get_data(as_text=True)
+    body_bytes = await request.body()
+    body = body_bytes.decode('utf-8')
 
-    handler = WebhookHandler(company['line_channel_secret'])
+    parser = WebhookParser(company['line_channel_secret'])
     try:
-        handler.handle(body, signature)
+        events = parser.parse(body, signature)
     except InvalidSignatureError:
         logger.error({"msg": "Invalid LINE signature", "slug": company_slug})
-        abort(400)
-    except Exception:
-        pass  # handler.handle raises if no @handler.add registered — that's OK
+        raise HTTPException(status_code=400, detail="Invalid signature")
 
-    # 3. 手動解析事件 (使用背景執行緒以秒回 200 OK，防止 LINE 逾時)
-    import threading
-    events = json.loads(body).get('events', [])
+    # 3. 處理事件 (使用背景執行緒以秒回 200 OK，防止 LINE 逾時)
     for event in events:
-        user_id = event.get('source', {}).get('userId')
-        reply_token = event.get('replyToken')
-        if not user_id or not reply_token:
+        if not hasattr(event, 'source') or not hasattr(event.source, 'user_id'):
             continue
+        user_id = event.source.user_id
+        reply_token = getattr(event, 'reply_token', None)
 
         # 處理文字訊息
-        if event.get('type') == 'message' and event.get('message', {}).get('type') == 'text':
-            threading.Thread(
-                target=handle_text_event,
-                args=(company, user_id, reply_token, event['message']['text']),
-                daemon=True
-            ).start()
+        if isinstance(event, MessageEvent) and isinstance(event.message, TextMessageContent):
+            background_tasks.add_task(
+                handle_text_event,
+                company, user_id, reply_token, event.message.text
+            )
             
         # 處理 Postback 事件（支援圖文選單按鈕連動）
-        elif event.get('type') == 'postback':
-            postback_data = event.get('postback', {}).get('data', '')
-            threading.Thread(
-                target=handle_postback_event,
-                args=(company, user_id, reply_token, postback_data),
-                daemon=True
-            ).start()
+        elif hasattr(event, 'postback') and hasattr(event.postback, 'data'):
+            background_tasks.add_task(
+                handle_postback_event,
+                company, user_id, reply_token, event.postback.data
+            )
 
-    return 'OK'
+    return Response(content="OK", media_type="text/plain")
 
 
 # ============================================
 # 健康檢查端點（LINE Developers 的 Verify 按鈕用）
 # ============================================
 
-@app.route("/health", methods=['GET'])
+@app.get("/health")
 def health():
-    return {"status": "ok", "supabase": supabase is not None}, 200
+    return JSONResponse(content={"status": "ok", "supabase": supabase is not None}, status_code=200)
 
 
 # ============================================
 # 靜態資源上傳目錄服務（支援 LINE 獲取 Logo & 自訂圖示）
 # ============================================
-UPLOAD_FOLDER = "/home/pipadmin/文件/uploads"
+PARENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+UPLOAD_FOLDER = os.path.join(PARENT_DIR, "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-@app.route("/uploads/<path:filename>", methods=['GET'])
-def serve_upload(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
+@app.get("/uploads/{filename:path}")
+def serve_upload(filename: str):
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    abs_base = os.path.abspath(UPLOAD_FOLDER)
+    abs_target = os.path.abspath(file_path)
+    if not abs_target.startswith(abs_base):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(file_path)
 
 
 if __name__ == "__main__":
     logger.info("多租戶 LINE Bot 伺服器啟動：http://0.0.0.0:5000")
     logger.info("Webhook 格式：/callback/{company_slug}")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    uvicorn.run(app, host="0.0.0.0", port=5000, log_level="info")
