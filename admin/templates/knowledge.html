@@ -250,10 +250,18 @@
           </td>
           <td><span class="status-dot {% if e.is_active %}green{% else %}red{% endif %}"></span></td>
           <td>
-            <form method="POST" action="{{ url_for('knowledge_delete', entry_id=e.id) }}"
-                  onsubmit="return confirm('確定刪除「{{ e.title }}」？')">
-              <button class="btn btn-sm btn-danger">🗑️</button>
-            </form>
+            <div style="display: inline-flex; gap: 0.35rem; align-items: center; vertical-align: middle;">
+              <button class="btn btn-sm btn-outline" 
+                      data-id="{{ e.id }}"
+                      data-title="{{ e.title | e }}"
+                      data-content="{{ e.content | e }}"
+                      data-tags="{{ (e.tags or []) | join(',') | e }}"
+                      onclick="openEditModal(this)" title="編輯" type="button">✏️</button>
+              <form method="POST" action="{{ url_for('knowledge_delete', entry_id=e.id) }}"
+                    onsubmit="return confirm('確定刪除「{{ e.title }}」？')" style="margin: 0; display: inline-block;">
+                <button class="btn btn-sm btn-danger">🗑️</button>
+              </form>
+            </div>
           </td>
         </tr>
         {% else %}
@@ -352,6 +360,38 @@
   </div>
 </div>
 {% endif %}
+
+<!-- Edit Modal -->
+<div id="edit-modal" class="modal" style="display:none; position:fixed; z-index:1000; left:0; top:0; width:100%; height:100%; overflow:auto; background-color:rgba(0,0,0,0.6); backdrop-filter:blur(4px);">
+  <div class="modal-content" style="background:var(--surface); border:1px solid var(--border); margin:10% auto; padding:2rem; width:50%; border-radius:12px; box-shadow: var(--shadow);">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.5rem;">
+      <h3 style="color:var(--primary); margin:0; font-size:1.2rem;">✏️ 編輯知識條目</h3>
+      <span onclick="closeEditModal()" style="color:var(--text-muted); font-size:1.5rem; cursor:pointer; font-weight:bold;">&times;</span>
+    </div>
+    <form id="edit-form" onsubmit="submitEdit(event)">
+      <input type="hidden" id="edit-id">
+      <div class="form-row" style="display:flex; gap:1rem; margin-bottom:1rem;">
+        <div class="form-group" style="flex:1;">
+          <label style="color:var(--text); font-size:0.85rem; display:block; margin-bottom:0.5rem;">標題 <span class="required" style="color:var(--danger);">*</span></label>
+          <input type="text" id="edit-title" required>
+        </div>
+        <div class="form-group" style="flex:1;">
+          <label style="color:var(--text); font-size:0.85rem; display:block; margin-bottom:0.5rem;">標籤（逗號分隔）</label>
+          <input type="text" id="edit-tags">
+        </div>
+      </div>
+      <div class="form-group" style="margin-bottom:1.5rem;">
+        <label style="color:var(--text); font-size:0.85rem; display:block; margin-bottom:0.5rem;">內容 <span class="required" style="color:var(--danger);">*</span></label>
+        <textarea id="edit-content" rows="8" required></textarea>
+      </div>
+      <div style="display:flex; justify-content:flex-end; gap:0.75rem;">
+        <button type="button" class="btn btn-outline" onclick="closeEditModal()">取消</button>
+        <button type="submit" class="btn btn-primary" id="edit-submit-btn">儲存修改</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 {% endblock %}
 
 {% block scripts %}
@@ -865,6 +905,73 @@ function showFlexModal(badgeElement) {
       pre.style.display = 'none';
       badgeElement.textContent = '🗂️ 含有 Flex 輪播卡片 (點擊展開 JSON)';
     }
+  }
+}
+
+/* ── 編輯 Modal 控制與提交 ── */
+function openEditModal(btnElement) {
+  try {
+    const id = btnElement.getAttribute('data-id');
+    const title = btnElement.getAttribute('data-title') || '';
+    const content = btnElement.getAttribute('data-content') || '';
+    const tags = btnElement.getAttribute('data-tags') || '';
+    
+    document.getElementById('edit-id').value = id;
+    document.getElementById('edit-title').value = title;
+    document.getElementById('edit-content').value = content;
+    document.getElementById('edit-tags').value = tags;
+    document.getElementById('edit-modal').style.display = 'block';
+  } catch (err) {
+    console.error("Failed to load entry data:", err);
+    alert("載入資料失敗: " + err.message);
+  }
+}
+
+function closeEditModal() {
+  document.getElementById('edit-modal').style.display = 'none';
+}
+
+// 點擊 Modal 外部時自動關閉
+window.onclick = function(event) {
+  const modal = document.getElementById('edit-modal');
+  if (event.target == modal) {
+    modal.style.display = 'none';
+  }
+}
+
+async function submitEdit(event) {
+  event.preventDefault();
+  const submitBtn = document.getElementById('edit-submit-btn');
+  submitBtn.disabled = true;
+  submitBtn.textContent = '⏳ 儲存中...';
+
+  const id = document.getElementById('edit-id').value;
+  const title = document.getElementById('edit-title').value.trim();
+  const content = document.getElementById('edit-content').value.trim();
+  const tags = document.getElementById('edit-tags').value.trim();
+
+  try {
+    const res = await fetch(`/knowledge/${id}/edit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: title,
+        content: content,
+        tags: tags
+      })
+    });
+    const data = await res.json();
+    if (res.ok && data.status === 'success') {
+      alert('✅ 條目修改成功！');
+      location.reload();
+    } else {
+      throw new Error(data.message || '修改失敗');
+    }
+  } catch (err) {
+    alert('❌ 錯誤：' + err.message);
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = '儲存修改';
   }
 }
 </script>

@@ -49,6 +49,13 @@ app.secret_key = os.getenv('ADMIN_SECRET_KEY', 'change-me-in-production-2026')
 # 啟動系統指標監控背景服務
 start_metrics_worker(app)
 
+@app.after_request
+def add_header(response):
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, post-check=0, pre-check=0, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '-1'
+    return response
+
 # 註冊路由模組
 register_auth_routes(app)
 register_companies_routes(app)

@@ -1,0 +1,126 @@
+/* ── Glassmorphism Light Theme Override ────────────────────────────── */
+
+:root {
+  /* Override Dark Theme Colors with Light Theme */
+  --bg: #f0f4fd;
+  --surface: rgba(255, 255, 255, 0.65);
+  --surface2: rgba(255, 255, 255, 0.4);
+  --border: rgba(255, 255, 255, 0.5);
+  --text: #2d3436;
+  --text-muted: #4b5563; /* Accessible contrast */
+  --primary: #6c5ce7;
+  --primary-h: #a29bfe;
+  --shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.07);
+}
+
+/* Background animated gradient shapes */
+.background-shapes {
+  position: fixed;
+  width: 100vw;
+  height: 100vh;
+  z-index: -1;
+  overflow: hidden;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+}
+
+.shape {
+  position: absolute;
+  filter: blur(80px);
+  opacity: 0.6;
+  border-radius: 50%;
+  animation: float 20s infinite alternate ease-in-out;
+  will-change: transform;
+}
+
+.shape-1 {
+  width: 500px;
+  height: 500px;
+  background: linear-gradient(to right, #a29bfe, #74b9ff);
+  top: -10%;
+  left: -10%;
+}
+
+.shape-2 {
+  width: 600px;
+  height: 600px;
+  background: linear-gradient(to right, #81ecec, #55efc4);
+  bottom: -20%;
+  right: -10%;
+  animation-delay: -5s;
+}
+
+.shape-3 {
+  width: 400px;
+  height: 400px;
+  background: linear-gradient(to right, #ffeaa7, #fab1a0);
+  top: 40%;
+  left: 40%;
+  animation-delay: -10s;
+}
+
+@keyframes float {
+  0% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(50px, 30px) scale(1.1); }
+  100% { transform: translate(-30px, 60px) scale(0.9); }
+}
+
+/* Accessibility for users who prefer reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .shape {
+      animation: none;
+  }
+}
+
+/* Apply Glassmorphism */
+.sidebar, .topbar, .card, .stat-card, .login-card, .chat-container, .chat-modal-card {
+  background: var(--surface);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+/* Graceful degradation */
+@supports not ((-webkit-backdrop-filter: blur(16px)) or (backdrop-filter: blur(16px))) {
+  .sidebar, .topbar, .card, .stat-card, .login-card, .chat-container, .chat-modal-card {
+      background: rgba(255, 255, 255, 0.95);
+  }
+}
+
+/* Logo Overrides */
+.brand-logo-img, .login-logo-img {
+  box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+}
+
+.brand-title, .login-title {
+  background: linear-gradient(45deg, var(--primary), #0984e3);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Login Page specific override to remove dark gradient */
+.login-page {
+  background: transparent; /* rely on body background */
+}
+
+/* Nav item overrides for light theme */
+.nav-item.active {
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+}
+
+.nav-item:hover {
+  background: rgba(255, 255, 255, 0.5);
+}
+
+/* Popup / Modal specific override - opaque background for readability */
+.modal-content, .chat-modal-card {
+  background: #ffffff !important; /* solid white */
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* Replace emoji nav icons with Material Icons if desired, but since they are hardcoded as emojis in base.html, 
+   we can optionally hide them and use ::before if needed, but it's easier to just let them be, or we can replace them in base.html. */

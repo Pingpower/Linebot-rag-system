@@ -21,10 +21,11 @@ async def get_embedding(text: str) -> list[float] | None:
     if not gemini_key:
         logger.error("Semantic Cache: GEMINI_API_KEY not found in environment.")
         return None
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={gemini_key}"
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-embedding-2:embedContent?key={gemini_key}"
     payload = {
-        "model": "models/text-embedding-004",
-        "content": {"parts": [{"text": text}]}
+        "model": "models/gemini-embedding-2",
+        "content": {"parts": [{"text": text}]},
+        "outputDimensionality": 768
     }
     try:
         async with httpx.AsyncClient() as client:

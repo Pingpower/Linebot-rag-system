@@ -267,6 +267,78 @@ def register_knowledge_routes(app):
             flash('找不到條目', 'danger')
         return redirect(url_for('knowledge', company_id=entry['company_id'] if entry else ''))
 
+    @app.route('/knowledge/<entry_id>/edit', methods=['POST'])
+    @login_required
+    def knowledge_edit(entry_id):
+        try:
+            data = request.get_json() or {}
+            title = data.get('title', '').strip()
+            content = data.get('content', '').strip()
+            tags_str = data.get('tags', '').strip()
+            
+            tags = [t.strip() for t in tags_str.split(',') if t.strip()] if tags_str else []
+            
+            if not title or not content:
+                return jsonify({"status": "error", "message": "標題與內容為必填"}), 400
+
+            # 1. 撈出 company_id 
+            doc_res = sb.table('knowledge_base').select('company_id').eq('id', entry_id).single().execute()
+            if not doc_res.data:
+                return jsonify({"status": "error", "message": "找不到該條目"}), 404
+            company_id = doc_res.data.get('company_id')
+
+            # 2. 優先呼叫 LINE Bot 的大腦核心修改 API
+            bot_api_url = "http://127.0.0.1:5000/api/knowledge/update"
+            payload = {
+                "id": entry_id,
+                "company_id": company_id,
+                "title": title,
+                "content": content,
+                "tags": tags
+            }
+            
+            try:
+                logger.info(f"Forwarding knowledge update for {entry_id} to LINE bot API")
+                r = req_lib.post(bot_api_url, json=payload, timeout=10)
+                r_json = r.json()
+                if r.status_code == 200 and r_json.get('status') == 'success':
+                    return jsonify({"status": "success", "message": "更新成功"})
+                else:
+                    return jsonify({"status": "error", "message": f"LINE Bot 同步失敗: {r_json.get('message')}"}), 500
+            except Exception as e:
+                # 3. 降級方案：如果 5000 連不上，就先手動寫進 DB
+                logger.warning(f"Failed to connect to LINE bot API on port 5000: {e}. Falling back to manual DB update.")
+                
+                # 撈舊文章
+                old_doc = sb.table('knowledge_base').select('content').eq('id', entry_id).single().execute()
+                old_content = old_doc.data.get('content') if old_doc.data else None
+                
+                # 清除快取
+                if invalidate_semantic_cache_by_text and old_content:
+                    invalidate_semantic_cache_by_text(company_id, old_content)
+                if invalidate_semantic_cache_by_text:
+                    invalidate_semantic_cache_by_text(company_id, content)
+
+                # 刪除舊碎塊
+                parent_tag = f"parent:{entry_id}"
+                sb.table('knowledge_base').delete().eq('company_id', company_id).contains('tags', [parent_tag]).execute()
+
+                # 計算新 embedding 並更新原始文章
+                emb = _compute_embedding(title, content)
+                sb.table('knowledge_base').update({
+                    'title': title,
+                    'content': content,
+                    'tags': tags,
+                    'is_active': True,
+                    'embedding': emb
+                }).eq('id', entry_id).execute()
+
+                return jsonify({"status": "success", "message": "本地更新成功，快取已清理"})
+
+        except Exception as e:
+            logger.error(f"Edit knowledge failed: {e}")
+            return jsonify({"status": "error", "message": str(e)}), 500
+
     @app.route('/knowledge/cache/<cache_id>/delete', methods=['POST'])
     @login_required
     def knowledge_cache_delete(cache_id):

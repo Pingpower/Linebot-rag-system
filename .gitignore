@@ -34,3 +34,4 @@ output/antigravity_backup_*
 .idea/
 .DS_Store
 .gemini/
+*.log.*

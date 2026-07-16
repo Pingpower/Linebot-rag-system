@@ -6,11 +6,9 @@
   <title>{% block title %}LINE Bot 管理後台{% endblock %}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <link rel="icon" type="image/png" href="{{ url_for('static', filename='favicon-96x96.png') }}" sizes="96x96" />
-  <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}" />
-  <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='apple-touch-icon.png') }}" />
-  <link rel="manifest" href="{{ url_for('static', filename='site.webmanifest') }}" />
 </head>
 <body>
   {% if session.get('logged_in') %}
@@ -26,25 +24,25 @@
       </div>
       <nav class="sidebar-nav">
         <a href="{{ url_for('dashboard') }}" class="nav-item {% if request.endpoint == 'dashboard' %}active{% endif %}">
-          <span class="nav-icon">📊</span> 總覽
+          <span class="nav-icon material-icons-round">dashboard</span> 總覽
         </a>
         <a href="{{ url_for('companies') }}" class="nav-item {% if 'compan' in request.endpoint %}active{% endif %}">
-          <span class="nav-icon">🏢</span> 公司管理
+          <span class="nav-icon material-icons-round">business</span> 公司管理
         </a>
         <a href="{{ url_for('knowledge') }}" class="nav-item {% if 'knowledge' in request.endpoint %}active{% endif %}">
-          <span class="nav-icon">🧠</span> 知識庫訓練
+          <span class="nav-icon material-icons-round">auto_stories</span> 知識庫訓練
         </a>
         <a href="{{ url_for('rich_menu') }}" class="nav-item {% if 'rich_menu' in request.endpoint %}active{% endif %}">
-          <span class="nav-icon">🖼️</span> 圖文選單
+          <span class="nav-icon material-icons-round">view_quilt</span> 圖文選單
         </a>
         <a href="{{ url_for('chat_history_view') }}" class="nav-item {% if 'chat_history_view' in request.endpoint %}active{% endif %}">
-          <span class="nav-icon">💬</span> 對話紀錄
+          <span class="nav-icon material-icons-round">forum</span> 對話紀錄
         </a>
         <a href="{{ url_for('models_explore') }}" class="nav-item {% if 'models' in request.endpoint %}active{% endif %}">
-          <span class="nav-icon">🤖</span> 模型市場
+          <span class="nav-icon material-icons-round">smart_toy</span> 模型市場
         </a>
         <a href="{{ url_for('stats') }}" class="nav-item {% if request.endpoint == 'stats' %}active{% endif %}">
-          <span class="nav-icon">📈</span> 使用統計
+          <span class="nav-icon material-icons-round">insights</span> 使用統計
         </a>
       </nav>
       <div class="sidebar-footer">
@@ -57,7 +55,7 @@
       <div class="topbar">
         <h1 class="page-title">{% block page_title %}{% endblock %}</h1>
         <div class="topbar-right">
-          <span class="admin-badge">👤 {{ session.get('username', 'admin') }}</span>
+          <span class="admin-badge" style="display:flex;align-items:center;gap:4px;"><span class="material-icons-round" style="font-size:16px;">person</span> {{ session.get('username', 'admin') }}</span>
         </div>
       </div>
 
