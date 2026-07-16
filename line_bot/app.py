@@ -1373,26 +1373,30 @@ async def execute_rag_qa_agent(company: dict, user_id: str, reply_token: str, us
         ai_reply = resp.choices[0].message.content
         raw_msg = resp.choices[0].message
         
-        # If content is empty but reasoning_content contains the generation, use reasoning_content
-        if (not ai_reply or not ai_reply.strip()) and hasattr(raw_msg, 'reasoning_content') and raw_msg.reasoning_content:
-            logger.info("Content was empty; falling back to reasoning_content for processing")
-            ai_reply = raw_msg.reasoning_content
+        # If content is empty, it means the model didn't finish thinking or hit max tokens before answering.
+        # DO NOT fallback to reasoning_content as ai_reply, because that will leak the thought process!
+        if (not ai_reply or not ai_reply.strip()):
+            if hasattr(raw_msg, 'reasoning_content') and raw_msg.reasoning_content:
+                logger.warning("Model only returned reasoning_content but no final answer. Aborting to prevent thought leak.")
+            ai_reply = ""
+        else:
+            # 1b. Strip <think>...</think> blocks, including UNCLOSED <think> tags!
+            ai_reply = re.sub(r'<think>[\s\S]*?(?:</think>|$)', '', ai_reply, flags=re.IGNORECASE).strip()
 
-        # 1a. Handle [FINAL_ANSWER] split and trailing noise truncation
-        if ai_reply:
+            # 1a. Handle [FINAL_ANSWER] split
             if "[FINAL_ANSWER]" in ai_reply:
                 ai_reply = ai_reply.split("[FINAL_ANSWER]")[-1].strip()
+            else:
+                # If there is no [FINAL_ANSWER] but it contains typical reasoning patterns, it might be a leaked thought.
+                # Let's do some heuristic cleanup just in case.
+                pass
             
             # Truncate any extra reasoning generated after the third option (e.g. trailing "Wait..." from LLM)
             option_match = re.search(r'(?:3[.\u3001]|３[.\u3001])\s*[^\n]+', ai_reply)
             if option_match:
                 ai_reply = ai_reply[:option_match.end()].strip()
 
-        # 1b. Strip <think>...</think> blocks (reasoning models leak their chain-of-thought here)
-        if ai_reply:
-            ai_reply = re.sub(r'<think>[\s\S]*?</think>', '', ai_reply, flags=re.IGNORECASE).strip()
-            
-            # 1c. Clean up leaked plain-text chain-of-thought (e.g. "Wait, I should..." followed by "Final Response Construction:")
+            # 1c. Clean up leaked plain-text chain-of-thought
             thought_patterns = [
                 r'(?i)[\s\S]*?final\s+response\s+construction\s*:\s*',
                 r'(?i)[\s\S]*?final\s+response\s*:\s*',
@@ -1410,7 +1414,7 @@ async def execute_rag_qa_agent(company: dict, user_id: str, reply_token: str, us
         # 2. Defensive check: if content is still empty after all fallbacks and stripping
         if not ai_reply or not ai_reply.strip():
             logger.warning({"msg": "LLM returned empty content after all fallbacks", "model": "local-model"})
-            ai_reply = "抱歉，AI 回應異常（模型未產生有效回覆），請稍候重試或換個方式詢問。"
+            ai_reply = "抱歉，AI 系統思考超時（可能遇到複雜問題），請換個方式詢問，或稍後再試。"
 
         # 3. 取得乾淨的文字紀錄，用來儲存至對話歷史 (不含 FLEX_CARD JSON 且去除 Markdown)
         clean_reply = re.sub(r'\[FLEX_CARD\][\s\S]*?\[/FLEX_CARD\]', '', ai_reply).strip()

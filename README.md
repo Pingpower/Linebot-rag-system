@@ -59,12 +59,27 @@ bash backup_env.sh
 
 ---
 
+## 最新核心技術與特色 (2026-07-17 更新)
+
+本專案除了基礎的 RAG 運作外，更深入優化了各項演算法與架構：
+
+1. **🏢 真實多租戶架構 (True Multi-Tenancy)**：透過 Supabase Row Level Security (RLS) 與動態 Webhook，單一伺服器可同時服務多間企業，彼此資料完全隔離。
+2. **🚀 三層式智慧語意快取 (Multi-Layer Semantic Cache)**：自研 Exact Match、降噪過濾與向量比對三層架構，攔截短句按鈕點擊，達成 `~50ms` 零成本秒回。
+3. **🧠 代理人記憶機制 (Agentic Memory)**：背景自動分析用戶對話，萃取用戶特徵（如年齡、居住地）寫入長期記憶庫，達成具備上下文脈絡的個性化回答。
+4. **🛡️ 推理洩漏防禦 (Reasoning Guard)**：專為思考型模型 (Reasoning LLMs) 設計，透過嚴格的 Regex 剝離未閉合標籤與 Fallback 阻斷，確保思考鏈不外洩。
+5. **🔍 混合式 RAG 檢索**：完美融合 Gemini Embedding 2 向量檢索與 FTS 全文檢索，透過 RRF 演算法混合排名。
+
+👉 **[詳細核心技術與架構白皮書請點此閱讀](docs/technical_architecture.md)**
+
+---
+
 ## 完整說明手冊
 
 更詳細的系統部署流程、管理員手冊、跨伺服器移植指南、系統微服務管理（Systemd）以及 AI 相關機制，請參閱本專案內置的完整手冊：
 
 👉 **[AI 應用系統部署與管理手冊](output/documents/ai_system_manual.md)**
 👉 **[AI 知識條目蒐集架構與操作手冊](output/documents/line_bot_admin_knowledge_manual.md)**
+👉 **[LINE Bot & RAG 核心技術與架構白皮書](docs/technical_architecture.md)**
 
 ---
 

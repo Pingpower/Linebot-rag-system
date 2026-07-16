@@ -81,3 +81,8 @@ After /clear or /compact: knowledge base and session stats preserved. Use `ctx p
 - **System Tools**: Scripts in JavaScript/Python/Shell, keep in `output/tools/`
 - **Output**: Deliver files to `~/文件/output/{documents,designs,tools}/`
 - **Templates**: Reuse from `~/文件/templates/`
+
+## [MANDATORY] 模型切換強制中斷點 (Hard Stops)
+
+*   **規劃結束 (Phase 3 -> 4)**：完成架構規劃與交辦文件後，**絕對禁止**逕自開始寫 code。主代理人必須強制停止執行，並在回覆最末端明確宣告：「*規劃已完成，請將模型切換至 Gemini 3.5 Flash 進行實作。*」，然後結束回合。
+*   **實作結束 (Phase 4 -> 5)**：完成代碼實作與本機初步測試後，**絕對禁止**自己進行最終 Review。主代理人必須強制停止執行，並明確宣告：「*實作已完成，請將模型切換至 Gemini 3.1 Pro 進行 Review 審查。*」，然後結束回合。
