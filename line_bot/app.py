@@ -1179,11 +1179,13 @@ async def route_user_intent(company: dict, user_id: str, reply_token: str, user_
             return True
 
     # ── 2. 語意快取：查詢是否有高相似度的快取回覆 ──
-    # 防禦性閘門：如果使用者發問極短（小於 12 個字），直接跳過快取，避免短句上下文錯亂
-    cached_reply = None
-    if len(user_message) >= 12:
-        cached_reply = await check_cache(company['id'], user_message)
-        
+    # 優化：即使發問極短，依然允許進行「精確字串比對」(bypass_semantic=True)，大於等於 12 個字才允許進行「語意向量比對」
+    cached_reply = await check_cache(
+        company['id'], 
+        user_message, 
+        bypass_semantic=(len(user_message) < 12)
+    )
+    
     if cached_reply:
         logger.info({"msg": "Semantic cache hit, skipping LLM", "user_msg": user_message[:50]})
         
