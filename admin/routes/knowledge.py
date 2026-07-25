@@ -34,8 +34,9 @@ def register_knowledge_routes(app):
             logger.warning("get_embedding is not available. Embedding set to None.")
             return None
         try:
+            import asyncio
             text_to_embed = f"標題：{title}\n內容：{content}"
-            return get_embedding(text_to_embed)
+            return asyncio.run(get_embedding(text_to_embed))
         except Exception as e:
             logger.error(f"Failed to generate embedding in admin backend: {e}")
             return None
@@ -610,36 +611,40 @@ def register_knowledge_routes(app):
     @login_required
     def knowledge_ai_save():
         """批次儲存 AI 生成的知識條目"""
-        data = request.get_json()
-        company_id = data.get('company_id')
-        entries    = data.get('entries', [])  # [{title, content, tags}]
+        try:
+            data = request.get_json()
+            company_id = data.get('company_id')
+            entries    = data.get('entries', [])  # [{title, content, tags}]
 
-        if not company_id or not entries:
-            return jsonify({'error': '缺少必要欄位'}), 400
+            if not company_id or not entries:
+                return jsonify({'error': '缺少必要欄位'}), 400
 
-        saved = 0
-        for e in entries:
-            tags = e.get('tags', [])
-            if isinstance(tags, str):
-                tags = [t.strip() for t in tags.split(',') if t.strip()]
+            saved = 0
+            for e in entries:
+                tags = e.get('tags', [])
+                if isinstance(tags, str):
+                    tags = [t.strip() for t in tags.split(',') if t.strip()]
+                    
+                metadata = {
+                    'summary': e.get('summary', '').strip(),
+                    'target': e.get('target', '').strip(),
+                    'action_text': e.get('action_text', '').strip()
+                }
                 
-            metadata = {
-                'summary': e.get('summary', '').strip(),
-                'target': e.get('target', '').strip(),
-                'action_text': e.get('action_text', '').strip()
-            }
-            
-            emb = _compute_embedding(e.get('title', '（未命名）'), e.get('content', ''))
-            sb.table('knowledge_base').insert({
-                'company_id': company_id,
-                'title':      e.get('title', '（未命名）'),
-                'content':    e.get('content', ''),
-                'tags':       tags,
-                'embedding':  emb,
-                'metadata':   metadata,
-                'is_active':  True,
-            }).execute()
-            _invalidate_cache_for_text(company_id, f"{e.get('title', '')}\n{e.get('content', '')}")
-            saved += 1
+                emb = _compute_embedding(e.get('title', '（未命名）'), e.get('content', ''))
+                sb.table('knowledge_base').insert({
+                    'company_id': company_id,
+                    'title':      e.get('title', '（未命名）'),
+                    'content':    e.get('content', ''),
+                    'tags':       tags,
+                    'embedding':  emb,
+                    'metadata':   metadata,
+                    'is_active':  True,
+                }).execute()
+                _invalidate_cache_for_text(company_id, f"{e.get('title', '')}\n{e.get('content', '')}")
+                saved += 1
 
-        return jsonify({'ok': True, 'saved': saved})
+            return jsonify({'ok': True, 'saved': saved})
+        except Exception as e:
+            logger.error({'msg': 'knowledge_ai_save failed', 'error': str(e)})
+            return jsonify({'error': str(e)}), 500
