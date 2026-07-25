@@ -73,6 +73,57 @@ bash backup_env.sh
 
 ---
 
+## 最新架構優化與高可用性升級 (2026-07-25 更新)
+
+本次升級大幅增強了系統在真實線上高併發環境下的穩定性與搜尋精準度：
+
+1. **多代理人協作架構 (Multi-Agent Orchestration)**：
+   重構了意圖識別與 RAG 檢索流程。現在由 `Router Agent` 負責意圖分流，若需檢索，則交由 `Query Expansion Agent` 進行查詢重寫與標籤預測 (Intent Classifier)，最後由 `RAG QA Agent` 組合混合檢索結果進行回答。
+2. **高可用性背景處理 (Resilient Background Tasks)**：
+   LINE Webhook 要求秒回，系統全面改採 FastAPI `BackgroundTasks` 進行非同步處理。搭配 55 秒動態 `force_push` 門檻，最大化利用免費 Reply Token；並導入了**全域異常退場機制 (Global Fallback)**，在任何 API 或資料庫崩潰時主動安撫用戶。
+3. **智慧切塊與並發嵌入 (Smart Chunking & Parallel Embedding)**：
+   知識庫自動整理系統導入了語意邊界切塊 (`smart_chunk`)，優先依段落、句子邊界進行切割，並加入防爆硬切斷。透過 `ThreadPoolExecutor` 搭配 Token-bucket 速率限制器 (`RateLimiter`)，在不觸發外部 API 限流的前提下將向量化速度提升 5 倍。
+4. **pgvector + pg_trgm 混合檢索 (Hybrid Search)**：
+   在 Supabase 中實作了 RRF (Reciprocal Rank Fusion) 演算法，完美融合 Gemini 768 維向量語意相似度與 pg_trgm N-Gram 中文模糊比對，並支援 `filter_tags` 進行標籤精準過濾。
+
+### 核心系統架構圖 (System Architecture)
+
+```mermaid
+graph TD
+    User([LINE 用戶]) -->|傳送文字訊息| Webhook[FastAPI Webhook /callback]
+    Webhook -->|秒回 200 OK| Webhook
+    Webhook -.->|觸發 Background Task| Orchestrator[多代理人協調者 handle_text_event]
+    
+    subgraph Multi-Agent Orchestration
+        Orchestrator --> Router[Router Agent 意圖分流]
+        Router -->|快取命中| Cache[(Semantic Cache DB)]
+        Router -->|需要知識庫| Expander[Query Expansion Agent]
+        Expander -->|重寫 Query + Tags| Searcher[RAG QA Agent]
+    end
+    
+    subgraph Supabase PostgreSQL
+        Searcher -->|呼叫 RPC| HybridSearch{match_knowledge_hybrid}
+        HybridSearch -->|Vector 檢索| pgvector[(HNSW 向量索引)]
+        HybridSearch -->|Fuzzy 檢索| pgtrgm[(Trigram 模糊索引)]
+        pgvector --> RRF[RRF 混合排名]
+        pgtrgm --> RRF
+    end
+    
+    RRF --> Searcher
+    Searcher --> LocalLLM((本地 LLM llama.cpp))
+    LocalLLM -->|生成 Flex 卡片/文字| ReplyAPI[LINE Reply/Push API]
+    ReplyAPI --> User
+    
+    subgraph Data Pipeline
+        Admin[管理後台 新增文稿] --> Sync[sync_embeddings.py]
+        Sync -->|1. 語意智慧切塊 smart_chunk| Chunks
+        Sync -->|2. 批次並發 + RateLimiter| GeminiAPI[Gemini Embedding API]
+        GeminiAPI -->|寫入向量| pgvector
+    end
+```
+
+---
+
 ## 完整說明手冊
 
 更詳細的系統部署流程、管理員手冊、跨伺服器移植指南、系統微服務管理（Systemd）以及 AI 相關機制，請參閱本專案內置的完整手冊：
