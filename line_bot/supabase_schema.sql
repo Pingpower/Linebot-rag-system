@@ -3,8 +3,9 @@
 -- 請到 Supabase Dashboard > SQL Editor 執行此檔案
 -- ============================================
 
--- Enable the pgvector extension to support vector data types
+-- Enable the pgvector and pg_trgm extensions
 CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 -- 1. 公司設定表
 CREATE TABLE IF NOT EXISTS companies (
@@ -41,7 +42,7 @@ CREATE TABLE IF NOT EXISTS knowledge_base (
 -- Replaces the original to_tsvector('simple', ...) which doesn't support Chinese tokenization.
 CREATE INDEX IF NOT EXISTS knowledge_base_trgm_idx
     ON knowledge_base
-    USING gin ((title || ' ' || content) gin_trgm_ops);
+    USING gin ((COALESCE(title, '') || ' ' || COALESCE(content, '')) gin_trgm_ops);
 
 -- Composite B-tree Index for Tenant Isolation & Status Filtering
 -- Speeds up standard lookups and delete cascades
@@ -214,6 +215,8 @@ RETURNS TABLE (
   similarity float
 )
 LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public, extensions
 AS $$
 BEGIN
   RETURN QUERY
@@ -233,17 +236,16 @@ END;
 $$;
 
 
--- Enable pg_trgm extension for Chinese-friendly fuzzy text matching
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
-
 -- RPC: Hybrid Search (Vector + Trigram Fuzzy Text Match)
 -- Uses pg_trgm instead of to_tsvector for Chinese text support.
 -- RRF constants: vector=60 (standard), trigram=120 (de-emphasized since trigram is less precise).
+-- Explicit search_path ensures similarity(text, text) resolves across all roles (service_role, postgres, anon).
 CREATE OR REPLACE FUNCTION match_knowledge_hybrid (
   query_embedding vector(768),
   query_text text,
   match_count int,
-  company_filter uuid
+  company_filter uuid,
+  filter_tags text[] DEFAULT NULL
 )
 RETURNS TABLE (
   id uuid,
@@ -252,40 +254,55 @@ RETURNS TABLE (
   similarity float
 )
 LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public, extensions
 AS $$
 BEGIN
   RETURN QUERY
   WITH vector_matches AS (
     SELECT
       kb.id,
-      ROW_NUMBER() OVER (ORDER BY kb.embedding <=> query_embedding) as rank
+      ROW_NUMBER() OVER (ORDER BY kb.embedding <=> query_embedding) AS rank
     FROM knowledge_base kb
     WHERE kb.is_active = true
       AND kb.company_id = company_filter
+      AND kb.embedding IS NOT NULL
+      AND (filter_tags IS NULL OR kb.tags @> filter_tags)
+    ORDER BY kb.embedding <=> query_embedding
     LIMIT match_count * 2
   ),
   trgm_matches AS (
     SELECT
       kb.id,
-      ROW_NUMBER() OVER (ORDER BY similarity(kb.title || ' ' || kb.content, query_text) DESC) as rank
+      ROW_NUMBER() OVER (ORDER BY similarity(COALESCE(kb.title, '') || ' ' || COALESCE(kb.content, ''), query_text) DESC) AS rank
     FROM knowledge_base kb
     WHERE kb.is_active = true
       AND kb.company_id = company_filter
-      AND similarity(kb.title || ' ' || kb.content, query_text) > 0.1
+      AND (filter_tags IS NULL OR kb.tags @> filter_tags)
+      AND similarity(COALESCE(kb.title, '') || ' ' || COALESCE(kb.content, ''), query_text) > 0.1
+    ORDER BY similarity(COALESCE(kb.title, '') || ' ' || COALESCE(kb.content, ''), query_text) DESC
     LIMIT match_count * 2
+  ),
+  rrf_fusion AS (
+    SELECT
+      COALESCE(vm.id, tm.id) AS matched_id,
+      (
+        COALESCE(1.0 / (60 + vm.rank), 0.0) +
+        COALESCE(1.0 / (120 + tm.rank), 0.0)
+      )::float AS rrf_score
+    FROM vector_matches vm
+    FULL OUTER JOIN trgm_matches tm ON vm.id = tm.id
+    ORDER BY rrf_score DESC
+    LIMIT match_count
   )
   SELECT
     kb.id,
     kb.title,
     kb.content,
-    -- RRF fusion: vector weight k=60 (dominant), trigram weight k=120 (supplementary)
-    (COALESCE(1.0 / (60 + vm.rank), 0.0) + COALESCE(1.0 / (120 + tm.rank), 0.0))::float AS similarity
-  FROM knowledge_base kb
-  LEFT JOIN vector_matches vm ON kb.id = vm.id
-  LEFT JOIN trgm_matches tm ON kb.id = tm.id
-  WHERE (vm.id IS NOT NULL OR tm.id IS NOT NULL)
-  ORDER BY similarity DESC
-  LIMIT match_count;
+    rf.rrf_score AS similarity
+  FROM rrf_fusion rf
+  JOIN knowledge_base kb ON kb.id = rf.matched_id
+  ORDER BY rf.rrf_score DESC;
 END;
 $$;
 
@@ -303,6 +320,8 @@ RETURNS TABLE (
   similarity float
 )
 LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public, extensions
 AS $$
 BEGIN
   RETURN QUERY

@@ -41,6 +41,7 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 # ============================================
 # 初始化
 # ============================================
+background_tasks_set = set()
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -202,6 +203,25 @@ llm_client = AsyncOpenAI(
 )
 LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "local-model")
 
+
+async def call_llm_with_retry(messages: list[dict], temperature: float = 0.2, max_tokens: int = 2048, timeout: float = 60.0, max_retries: int = 2):
+    """呼叫本地 LLM 並具備防護與自動重試機制 (防止 APITimeoutError / APIConnectionError)"""
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = await llm_client.chat.completions.create(
+                model=LOCAL_LLM_MODEL,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout
+            )
+            return resp
+        except (openai.APITimeoutError, openai.APIConnectionError) as e:
+            logger.warning(f"LLM call attempt {attempt}/{max_retries} failed: {e}")
+            if attempt == max_retries:
+                raise
+            await asyncio.sleep(0.5 * attempt)
+
 # 公司設定快取（TTL = 5 分鐘，避免每次請求都查 DB）
 company_cache: TTLCache = TTLCache(maxsize=100, ttl=300)
 company_cache_lock = threading.Lock()
@@ -241,15 +261,17 @@ def get_company(slug: str) -> dict | None:
 from semantic_cache import get_embedding
 
 
-async def search_knowledge(company_id: str, query: str, limit: int = 3, required_tags: list[str] = None) -> list[dict]:
+async def search_knowledge(company_id: str, query: str, limit: int = 3, required_tags: list[str] = None, query_embedding: list[float] = None) -> list[dict]:
     """使用 Supabase 混合檢索（Vector + FTS + RRF 融合評分，支援標籤過濾）(非同步)"""
     if not supabase:
         logger.warning("Supabase is not initialized. RAG skipped.")
         return []
     try:
-        # 1. 生成 query embedding
-        query_embedding = await get_embedding(query)
-        if not query_embedding:
+        # 1. 使用極預算或生成 query embedding
+        q_emb = query_embedding
+        if not q_emb:
+            q_emb = await get_embedding(query)
+        if not q_emb:
             logger.warning("Failed to generate query embedding, returning empty search results.")
             return []
             
@@ -259,7 +281,7 @@ async def search_knowledge(company_id: str, query: str, limit: int = 3, required
             return supabase.rpc(
                 'match_knowledge_hybrid',
                 {
-                    'query_embedding': query_embedding,
+                    'query_embedding': q_emb,
                     'query_text': query,
                     'match_count': limit,
                     'company_filter': company_id,
@@ -355,21 +377,26 @@ async def execute_memory_update_agent(company_id: str, user_id: str, user_messag
                 {"role": "user", "content": prompt}
             ],
             temperature=0.1,
-            max_tokens=512,
+            max_tokens=1024,
             timeout=30.0
         )
-        llm_output = resp.choices[0].message.content.strip()
-        
-        # 嘗試清理 Markdown 圍欄
-        if llm_output.startswith("```"):
-            llm_output = re.sub(r'^```(?:json)?\n', '', llm_output)
-            llm_output = re.sub(r'\n```$', '', llm_output)
-            llm_output = llm_output.strip()
+        choice = resp.choices[0]
+        if choice.finish_reason == 'length':
+            logger.warning("Memory update agent output truncated due to finish_reason == 'length' (max_tokens exhausted).")
 
-        new_profile = json.loads(llm_output)
+        llm_output = choice.message.content.strip() if choice.message.content else ""
         
-        # 如果有變化，則更新 DB
-        if new_profile != current_profile:
+        # Reasoning Guard: strip <think>...</think> blocks including unclosed tags before parsing JSON
+        llm_output = re.sub(r'<think>[\s\S]*?(?:</think>|$)', '', llm_output, flags=re.IGNORECASE).strip()
+        if not llm_output:
+            return
+
+        # Regex extract JSON code block if wrapped in Markdown fenced code block
+        match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', llm_output, flags=re.IGNORECASE)
+        clean_json_str = match.group(1).strip() if match else llm_output
+
+        new_profile = json.loads(clean_json_str)
+        if isinstance(new_profile, dict) and new_profile != current_profile:
             def _do_upsert():
                 return supabase.table('user_profiles').upsert({
                     "company_id": company_id,
@@ -401,29 +428,75 @@ async def execute_query_expansion_agent(user_message: str, history: list[dict]) 
         f"{history_context}\n"
         f"【用戶最新發問】：\"{user_message}\"\n\n"
         "【任務指引】：\n"
-        "2. 不要加上任何你的解釋、問候語、或引號。直接輸出擴寫後的查詢文字本身。\n"
-        "3. 如果該發問已經足夠清晰具體（如「屏東縣身心障礙者租金補助如何辦理」），請直接原樣輸出，不要做無意義的展開。\n"
-        "請直接輸出擴寫後的內容："
+        "1. 請優先以 JSON 格式輸出：{\"query\": \"展開後的完整發問\", \"tags\": [\"標籤1\", \"標籤2\"]}，若無特定標籤請設為 null。\n"
+        "2. 不要加上任何你的解釋、問候語、或引號；若無法輸出 JSON，直接輸出擴寫後的查詢文字本身亦可。\n"
+        "3. 如果該發問已經足夠清晰具體（如「屏東縣身心障礙者租金補助如何辦理」），請直接原樣輸出其 query，不要做無意義的展開。\n"
+        "請直接輸出結果："
     )
     
     try:
         resp = await llm_client.chat.completions.create(
             model=LOCAL_LLM_MODEL,
             messages=[
-                {"role": "system", "content": "你是一個查詢展開器。直接輸出查詢語句，不做任何解釋。"},
+                {"role": "system", "content": "你是一個查詢重寫與標籤路由助理。請優先以 JSON 格式 {\"query\": \"...\", \"tags\": [...]} 輸出，或直接輸出查詢語句，不做任何解釋。"},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3,
-            max_tokens=256,
+            max_tokens=512,
             timeout=10.0
         )
-        expanded = resp.choices[0].message.content.strip()
-        if expanded:
-            expanded = re.sub(r'^["\'「]+|["\'」]+$', '', expanded).strip()
-            return expanded
+        choice = resp.choices[0]
+        content = choice.message.content.strip() if choice.message.content else ""
+        raw_msg = choice.message
+        
+        if choice.finish_reason == 'length':
+            logger.warning("Query expansion truncated due to finish_reason == 'length' (max_tokens exhausted).")
+
+        if not content and hasattr(raw_msg, 'reasoning_content') and raw_msg.reasoning_content:
+            logger.warning("Query expansion model only returned reasoning_content. Aborting to prevent thought leak.")
+            return {"query": user_message, "tags": None}
+
+        # Strip <think>...</think> blocks
+        content = re.sub(r'<think>[\s\S]*?(?:</think>|$)', '', content, flags=re.IGNORECASE).strip()
+        if not content:
+            return {"query": user_message, "tags": None}
+
+        # Extract JSON code block if wrapped in Markdown fenced block
+        match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', content, flags=re.IGNORECASE)
+        clean_text = match.group(1).strip() if match else content
+
+        try:
+            parsed = json.loads(clean_text)
+            if isinstance(parsed, dict):
+                query_val = parsed.get("query", user_message)
+                if not isinstance(query_val, str) or not query_val.strip():
+                    query_val = user_message
+                else:
+                    query_val = query_val.strip()
+
+                tags_val = parsed.get("tags")
+                if isinstance(tags_val, str):
+                    tags_val = [t.strip() for t in re.split(r'[,、\s]+', tags_val) if t.strip()]
+                elif isinstance(tags_val, list):
+                    tags_val = [str(t).strip() for t in tags_val if isinstance(t, str) and t.strip()]
+                else:
+                    tags_val = None
+
+                if not tags_val:
+                    tags_val = None
+
+                return {"query": query_val, "tags": tags_val}
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+
+        # Plain text fallback
+        expanded = re.sub(r'^["\'「]+|["\'」]+$', '', content).strip()
+        if not expanded:
+            expanded = user_message
+        return {"query": expanded, "tags": None}
     except Exception as e:
         logger.warning(f"Failed to expand query: {str(e)}")
-    return user_message
+    return {"query": user_message, "tags": None}
 
 
 def _strip_markdown(text: str) -> str:
@@ -1065,7 +1138,7 @@ def strip_options_section(ai_reply: str) -> str:
     return ai_reply
 
 
-async def route_user_intent(company: dict, user_id: str, reply_token: str, user_message: str, start_time: float) -> bool:
+async def route_user_intent(company: dict, user_id: str, reply_token: str, user_message: str, start_time: float, query_embedding: list[float] | None = None) -> tuple[bool, list[float] | None]:
     """Router Agent: 判斷用戶意圖並進行分流。
     
     支援：
@@ -1073,7 +1146,7 @@ async def route_user_intent(company: dict, user_id: str, reply_token: str, user_
     2. 動態影片生成 (/video, /動起來)
     3. 語意快取命中 (Semantic Cache Hit)
     
-    回傳 True 代表意圖已被攔截並完成處理，不需進入後續的 RAG 問答。
+    回傳 (is_handled, q_emb)
     """
     msg_lower = user_message.lower().strip()
     
@@ -1082,7 +1155,7 @@ async def route_user_intent(company: dict, user_id: str, reply_token: str, user_
         prompt = user_message[6:].strip()
         if not prompt:
             await reply_text(company, reply_token, "請輸入繪圖提示詞，例如：/draw 一隻戴著墨鏡的貓", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
-            return True
+            return True, None
             
         try:
             parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1118,29 +1191,29 @@ async def route_user_intent(company: dict, user_id: str, reply_token: str, user_
                                 )
                             else:
                                 raise ex
-                return True
+                return True, None
             else:
-                await reply_text(company, reply_token, "抱歉，圖片生成失敗，請稍候重試。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
-                return True
+                await reply_text(company, reply_token, "抱歉，圖片生成失敗，請稍後重試。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
+                return True, None
         except Exception as e:
             logger.error({"msg": "LINE /draw failed", "error": str(e)})
-            await reply_text(company, reply_token, "抱歉，圖片生成服務目前不可用。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
-            return True
+            await reply_text(company, reply_token, "抱歉，繪圖服務目前不可用。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
+            return True, None
             
-    elif msg_lower == "/video" or msg_lower == "/動起來":
+    if msg_lower.startswith("/video") or msg_lower.startswith("/動起來"):
         with user_image_lock:
             img_url = user_last_image.get(user_id)
         if not img_url:
-            await reply_text(company, reply_token, "您最近沒有生成過圖片喔！請先使用「/draw 您的指令」生成一張圖片。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
-            return True
+            await reply_text(company, reply_token, "請先使用「/draw 描述」生成一張圖片後，才能將其轉為短影片喔！", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
+            return True, None
             
         try:
             parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             if parent_dir not in sys.path:
                 sys.path.append(parent_dir)
-            from admin.hf_api import generate_video
+            from admin.hf_api import generate_video_from_image
             
-            video_url = generate_video(img_url)
+            video_url = generate_video_from_image(img_url)
             if video_url:
                 use_push = (time.time() - start_time) >= 4.2
                 config = Configuration(access_token=company['line_access_token'])
@@ -1169,10 +1242,10 @@ async def route_user_intent(company: dict, user_id: str, reply_token: str, user_
                                 )
                             else:
                                 raise ex
-                return True
+                return True, None
             else:
                 await reply_text(company, reply_token, "抱歉，影片生成失敗（可能 Hugging Face 佇列擁擠），請稍候重試。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
-                return True
+                return True, None
         except Exception as e:
             logger.error({"msg": "LINE /video failed", "error": str(e)})
             await reply_text(company, reply_token, "抱歉，影片生成服務目前不可用。", user_id=user_id, force_push=((time.time() - start_time) >= 4.2))
@@ -1180,10 +1253,11 @@ async def route_user_intent(company: dict, user_id: str, reply_token: str, user_
 
     # ── 2. 語意快取：查詢是否有高相似度的快取回覆 ──
     # 優化：即使發問極短，依然允許進行「精確字串比對」(bypass_semantic=True)，大於等於 12 個字才允許進行「語意向量比對」
-    cached_reply = await check_cache(
+    cached_reply, q_emb = await check_cache(
         company['id'], 
         user_message, 
-        bypass_semantic=(len(user_message) < 12)
+        bypass_semantic=(len(user_message) < 12),
+        query_embedding=query_embedding
     )
     
     if cached_reply:
@@ -1204,11 +1278,10 @@ async def route_user_intent(company: dict, user_id: str, reply_token: str, user_
         else:
             cached_reply_for_display = cached_reply
 
-        # 儲存對話記錄（快取命中也要記錄，儲存剔除後的乾淨文字）
+        # 準備對話記錄的乾淨文字
         clean_cached = re.sub(r'\[FLEX_CARD\][\s\S]*?\[/FLEX_CARD\]', '', cached_reply_for_display).strip()
         clean_cached = re.sub(r'\[FLEX_CARD\][\s\S]*', '', clean_cached).strip()
         clean_cached = _strip_markdown(clean_cached)
-        await run_in_threadpool(save_messages, company['id'], user_id, user_message, clean_cached)
 
         # 建立快取命中的引導按鈕 (RAG 未觸發所以使用 static_fallback)
         static_fallback = [
@@ -1227,34 +1300,70 @@ async def route_user_intent(company: dict, user_id: str, reply_token: str, user_
                 cached_reply_for_display,
                 logo_url=company.get('logo_url'),
                 user_id=user_id,
-                force_push=((time.time() - start_time) >= 4.2),
+                force_push=((time.time() - start_time) >= 55.0),
                 suggested_buttons=final_cached_buttons
             )
-        return True
+        
+        # 儲存對話記錄移至背景任務執行 (加上 Exception Handling)
+        async def safe_save_messages(*args):
+            try:
+                await run_in_threadpool(save_messages, *args)
+            except Exception as e:
+                logger.error({"msg": "Background save_messages failed", "error": str(e)})
 
-    return False
+        task = asyncio.create_task(safe_save_messages(company['id'], user_id, user_message, clean_cached))
+        background_tasks_set.add(task)
+        task.add_done_callback(background_tasks_set.discard)
+        return True, q_emb
+
+    return False, q_emb
 
 
-async def execute_rag_qa_agent(company: dict, user_id: str, reply_token: str, user_message: str, start_time: float):
+async def execute_rag_qa_agent(company: dict, user_id: str, reply_token: str, user_message: str, start_time: float, query_embedding: list[float] | None = None):
     """RAG QA Agent: 執行知識庫檢索、LLM 生成、以及回覆 UI 設計的串接。"""
-    # 1. 取得對話歷史與長期記憶 (User Profile)
-    history = await run_in_threadpool(get_history, company['id'], user_id, 3)
-    user_profile = await run_in_threadpool(get_user_profile, company['id'], user_id)
+    # 1. 並行取得對話歷史與長期記憶 (User Profile)
+    history, user_profile = await asyncio.gather(
+        run_in_threadpool(get_history, company['id'], user_id, 3),
+        run_in_threadpool(get_user_profile, company['id'], user_id)
+    )
+
+    # 限制對話歷史總字數不超過 500 字，避免 Prefill 膨脹，但強制保留最新的一筆
+    total_history_len = 0
+    truncated_history = []
+    for i, msg in enumerate(reversed(history or [])):
+        content = msg.get("content") or ""
+        # 最新的一筆訊息強制保留，如果太長則進行截斷
+        if i == 0:
+            if len(content) > 500:
+                msg = msg.copy()
+                msg["content"] = content[:500] + "..."
+            content_len = len(msg.get("content") or "")
+        else:
+            content_len = len(content)
+            if total_history_len + content_len > 500:
+                break
+        
+        truncated_history.append(msg)
+        total_history_len += content_len
+    history = list(reversed(truncated_history))
 
     # 2. 查詢重寫、展開與標籤預測 (Query Expansion & Intent Classifier)
-    search_query = user_message
-    required_tags = None
-    if len(user_message) < 12:
-        try:
-            expand_res = await execute_query_expansion_agent(user_message, history)
-            search_query = expand_res.get("query", user_message)
-            required_tags = expand_res.get("tags")
-            logger.info(f"Query expanded: '{user_message}' -> '{search_query}' | Tags filter: {required_tags}")
-        except Exception as expand_err:
-            logger.warning(f"Failed to run query expansion agent: {expand_err}")
+    expansion_result = await execute_query_expansion_agent(user_message, history)
+    search_query = expansion_result.get("query", user_message)
+    required_tags = expansion_result.get("tags")
+    logger.info({"msg": "Query expansion completed", "original": user_message[:50], "expanded": search_query[:50], "tags": required_tags})
 
-    # 3. 搜尋知識庫 (RAG)
-    docs = await search_knowledge(company['id'], search_query, required_tags=required_tags)
+    # 3. 並行搜尋知識庫 (RAG) 與載入公司圖文資產 (復用 query_embedding)
+    def _do_select_assets():
+        if not supabase:
+            return None
+        return supabase.table('company_assets').select('*').eq('company_id', company['id']).execute()
+
+    docs_task = search_knowledge(company['id'], search_query, required_tags=required_tags, query_embedding=query_embedding)
+    assets_task = run_in_threadpool(_do_select_assets)
+
+    docs, assets_res = await asyncio.gather(docs_task, assets_task)
+    assets = assets_res.data if (assets_res and hasattr(assets_res, 'data') and assets_res.data) else []
 
     # 3. 組合 system prompt 與檢查是否為 Strict RAG 模式
     original_prompt = company.get('system_prompt', '你是一個友善、專業的 AI 客服助理。')
@@ -1274,17 +1383,14 @@ async def execute_rag_qa_agent(company: dict, user_id: str, reply_token: str, us
             "請在回答時，優先主動結合此背景資訊，提供個人化的回覆（例如：若已知用戶有小孩，回答補助時應主動針對其有小孩的條件回答）。"
         )
 
-    # 3.1 載入自訂圖文資產/圖示以供 AI 動態輸出 FLEX_CARD
-    assets = []
-    try:
-        def _do_select_assets():
-            return supabase.table('company_assets').select('*').eq('company_id', company['id']).execute()
-        assets_res = await run_in_threadpool(_do_select_assets)
-        assets = assets_res.data or []
-    except Exception as e:
-        logger.warning({"msg": "Failed to fetch company assets", "error": str(e)})
-
-    assets_block = ""
+    context = ""
+    if docs:
+        raw_context = "\n\n".join(f"【{d['title']}】\n{d['content']}" for d in docs)
+        if len(raw_context) > 1200:
+            context = raw_context[:1200] + "\n\n（...部分資料已因長度限制截斷...）"
+            logger.info(f"RAG context truncated from {len(raw_context)} to {len(context)} chars")
+        else:
+            context = raw_context
 
     if is_strict_rag:
         # 在 Strict RAG 模式下，如果 docs 為空（即知識庫沒有匹配到任何資料），直接拒絕回答，不呼叫 LLM 節省資源！
@@ -1299,7 +1405,6 @@ async def execute_rag_qa_agent(company: dict, user_id: str, reply_token: str, us
             return
 
         # 如果有匹配到資料，則在 system_prompt 加上極嚴格的安全限制
-        context = "\n\n".join(f"【{d['title']}】\n{d['content']}" for d in docs)
         system_prompt += f"\n\n以下是公司相關資料，請優先參考：\n\n{context}"
         system_prompt += (
             "\n\n【重要安全指令】\n"
@@ -1310,10 +1415,10 @@ async def execute_rag_qa_agent(company: dict, user_id: str, reply_token: str, us
     else:
         # 正常 RAG 模式
         if docs:
-            context = "\n\n".join(f"【{d['title']}】\n{d['content']}" for d in docs)
             system_prompt += f"\n\n以下是公司相關資料，請優先參考：\n\n{context}"
 
-    # Unified response style instruction — optimized for 12B model clarity
+    company_contact = company.get('name', '相關單位')
+    # Unified response style instruction — Direct answer without CoT for fast response
     style_instruction = (
         "\n\n【回覆規則 — 嚴格遵守】\n"
         "■ 首輪直答，禁止空泛\n"
@@ -1324,12 +1429,8 @@ async def execute_rag_qa_agent(company: dict, user_id: str, reply_token: str, us
         "■ 精準數值化\n"
         "用戶問資格、條件、細節時：\n"
         "• 必須給出明確數值（年齡、設籍時間、收入門檻、截止日期）\n"
-        "• 若資料中無此數值，直接說「此項未收錄，建議致電 XXX 洽詢」\n"
+        f"• 若資料中無此數值，直接說「此項未收錄，建議致電 {company_contact} 洽詢」\n"
         "• 嚴禁「依各類別有所不同」「視情況而定」等模糊用語\n\n"
-        "■ 意圖辨識\n"
-        "• 問題明確具體（如「育兒津貼怎麼申請」）→ 直接給完整答案 + 步驟\n"
-        "• 問題模糊籠統（如「有什麼福利」）→ 先列 3-5 個常見類別讓用戶選\n"
-        "• 用戶選了某選項 → 立刻深入該主題完整細節\n\n"
         "■ 排版規則\n"
         "• 用 • 條列式呈現，每點一行\n"
         "• 重點用【】標示\n"
@@ -1346,11 +1447,7 @@ async def execute_rag_qa_agent(company: dict, user_id: str, reply_token: str, us
         "■ 禁止事項\n"
         "• 不要重複用戶的問題\n"
         "• 不要說「讓我為您查詢」「請稍等」\n"
-        "• 不要在 [FLEX_CARD] 外部輸出 any JSON\n\n"
-        "■ 系統格式標籤 (極重要)\n"
-        "當你思考完畢，準備輸出最終要給用戶的回答時，請「必須」在該回答的最開頭加上 [FINAL_ANSWER] 標記。\n"
-        "格式範例：[FINAL_ANSWER]屏東縣政府針對身心障礙者提供生活補助...\n"
-        "注意：[FINAL_ANSWER] 之前的所有內容都將被視為思考過程，只有其後的內容才會被用戶看見。因此請務必加上此標記！\n"
+        "• 不要在 [FLEX_CARD] 外部輸出 any JSON\n"
     )
     system_prompt += style_instruction
 
@@ -1360,68 +1457,41 @@ async def execute_rag_qa_agent(company: dict, user_id: str, reply_token: str, us
     messages.extend(history)
     messages.append({"role": "user", "content": user_message})
 
-    # 5. 呼叫本地 LLM
+    # 5. 呼叫本地 LLM (max_tokens 降至 800 加速)
     try:
-        resp = await llm_client.chat.completions.create(
-            model=LOCAL_LLM_MODEL,
+        resp = await call_llm_with_retry(
             messages=messages,
-            temperature=0.2, # lower temperature for factual RAG matching on 12B model
-            max_tokens=2048, # Increased to 2048 to prevent reasoning truncation from causing empty responses
-            timeout=90.0
+            temperature=0.2,
+            max_tokens=1500,
+            timeout=45.0
         )
-        logger.info(f"DEBUG LLM Raw: choices={resp.choices}")
-        ai_reply = resp.choices[0].message.content
-        raw_msg = resp.choices[0].message
+        choice = resp.choices[0]
+        finish_reason = choice.finish_reason
+        logger.info(f"DEBUG LLM Raw: choices={resp.choices} | finish_reason={finish_reason}")
+        ai_reply = choice.message.content or ""
         
-        # If content is empty, it means the model didn't finish thinking or hit max tokens before answering.
-        # DO NOT fallback to reasoning_content as ai_reply, because that will leak the thought process!
-        if (not ai_reply or not ai_reply.strip()):
-            if hasattr(raw_msg, 'reasoning_content') and raw_msg.reasoning_content:
-                logger.warning("Model only returned reasoning_content but no final answer. Aborting to prevent thought leak.")
-            ai_reply = ""
-        else:
-            # 1b. Strip <think>...</think> blocks, including UNCLOSED <think> tags!
-            ai_reply = re.sub(r'<think>[\s\S]*?(?:</think>|$)', '', ai_reply, flags=re.IGNORECASE).strip()
+        # 清除 <think> 標籤 (若有)
+        ai_reply = re.sub(r'<think>[\s\S]*?(?:</think>|$)', '', ai_reply, flags=re.IGNORECASE).strip()
+        if "[FINAL_ANSWER]" in ai_reply:
+            ai_reply = ai_reply.split("[FINAL_ANSWER]")[-1].strip()
 
-            # 1a. Handle [FINAL_ANSWER] split
-            if "[FINAL_ANSWER]" in ai_reply:
-                ai_reply = ai_reply.split("[FINAL_ANSWER]")[-1].strip()
-            else:
-                # If there is no [FINAL_ANSWER] but it contains typical reasoning patterns, it might be a leaked thought.
-                # Let's do some heuristic cleanup just in case.
-                pass
-            
-            # Truncate any extra reasoning generated after the third option (e.g. trailing "Wait..." from LLM)
-            option_match = re.search(r'(?:3[.\u3001]|３[.\u3001])\s*[^\n]+', ai_reply)
-            if option_match:
-                ai_reply = ai_reply[:option_match.end()].strip()
-
-            # 1c. Clean up leaked plain-text chain-of-thought
-            thought_patterns = [
-                r'(?i)[\s\S]*?final\s+response\s+construction\s*:\s*',
-                r'(?i)[\s\S]*?final\s+response\s*:\s*',
-                r'(?i)[\s\S]*?final\s+reply\s*:\s*',
-                r'(?i)[\s\S]*?final\s+output\s*:\s*',
-                r'(?i)[\s\S]*?response\s+construction\s*:\s*'
-            ]
-            for pattern in thought_patterns:
-                if re.search(pattern, ai_reply):
-                    candidate = re.sub(pattern, '', ai_reply, count=1).strip()
-                    if candidate:
-                        ai_reply = candidate
-                        break
-
-        # 2. Defensive check: if content is still empty after all fallbacks and stripping
+        # 2. Defensive check: if content is still empty
         if not ai_reply or not ai_reply.strip():
-            logger.warning({"msg": "LLM returned empty content after all fallbacks", "model": "local-model"})
-            ai_reply = "抱歉，AI 系統思考超時（可能遇到複雜問題），請換個方式詢問，或稍後再試。"
+            if docs and len(docs) > 0:
+                logger.warning({"msg": "LLM output empty, using RAG docs fallback summary", "model": LOCAL_LLM_MODEL})
+                doc_summary = "\n• ".join([d['title'] for d in docs[:3]])
+                first_content = docs[0]['content'][:180].replace('\n', ' ')
+                ai_reply = f"根據知識庫為您查詢到相關資訊：\n\n【{docs[0]['title']}】\n{first_content}...\n\n---\n👉 您可能還想知道：\n1. 檢視 {docs[0]['title'][:10]}\n2. 聯繫客服服務"
+            else:
+                logger.warning({"msg": "LLM returned empty content after all fallbacks", "model": LOCAL_LLM_MODEL})
+                ai_reply = "抱歉，AI 服務暫時無法處理您的問題，請換個方式詢問，或稍後再試。"
 
-        # 3. 取得乾淨的文字紀錄，用來儲存至對話歷史 (不含 FLEX_CARD JSON 且去除 Markdown)
+        # 3. 取得乾淨的文字紀錄 (不含 FLEX_CARD JSON 且去除 Markdown)
         clean_reply = re.sub(r'\[FLEX_CARD\][\s\S]*?\[/FLEX_CARD\]', '', ai_reply).strip()
         clean_reply = re.sub(r'\[FLEX_CARD\][\s\S]*', '', clean_reply).strip()
         clean_reply = _strip_markdown(clean_reply)
     except openai.APITimeoutError:
-        logger.error({"msg": "LLM request timeout after 90s"})
+        logger.error({"msg": "LLM request timeout after 60s"})
         ai_reply = "抱歉，AI 服務暫時無法使用，請稍後再試。"
         clean_reply = ai_reply
     except openai.APIConnectionError as e:
@@ -1433,42 +1503,30 @@ async def execute_rag_qa_agent(company: dict, user_id: str, reply_token: str, us
         ai_reply = "抱歉，AI 服務暫時無法使用，請稍後再試。"
         clean_reply = ai_reply
 
-    # 6. 儲存對話記錄
-    await run_in_threadpool(save_messages, company['id'], user_id, user_message, clean_reply)
-
-    # 將成功的 LLM 回覆寫入語意快取（供後續相似問題命中）
-    # 防禦性閘門：
-    # 1. 原始問句長度必須大於等於 12 個字（防止寒暄或代名詞短句污染快取）
-    # 2. 不能是連線失敗的罐頭回覆
-    # 3. 關鍵！如果對話有使用到 user_profile（長期記憶），表示此回答極度客製化，絕對不能快取給其他人看
-    is_cacheable = (
-        len(user_message) >= 12 and
-        ai_reply and
-        ai_reply != "抱歉，AI 服務暫時無法使用，請稍後再試。" and
-        not user_profile
-    )
-    if is_cacheable:
-        try:
-            await add_to_cache(company['id'], user_message, ai_reply)
-            logger.info(f"Adding to semantic cache: '{user_message}'")
-        except Exception as cache_err:
-            logger.warning({"msg": "Failed to add to semantic cache", "error": str(cache_err)})
-    else:
-        logger.info(f"Skip semantic caching for query '{user_message}' (length={len(user_message)}, profile={bool(user_profile)})")
-
-    # 7. 由 UI/UX 代理人接手進行畫面的格式化與回覆發送
+    # 6. 先由 UI/UX 代理人接手進行畫面的格式化與回覆發送給用戶
     await execute_ui_ux_agent(
         company, user_id, reply_token, 
         ai_reply, clean_reply, docs, 
         user_message, start_time
     )
 
-    # 8. 在背景非同步啟動記憶更新 (Memory Update Agent)，不阻塞用戶回應時間
-    asyncio.create_task(
+    # 7. 將對話記錄與語意快取寫入移至背景非同步執行，不阻塞用戶回應
+    task1 = asyncio.create_task(
+        _async_save_and_cache(
+            company['id'], user_id, user_message, clean_reply, ai_reply, user_profile, query_embedding
+        )
+    )
+    background_tasks_set.add(task1)
+    task1.add_done_callback(background_tasks_set.discard)
+
+    # 8. 在背景非同步啟動記憶更新 (Memory Update Agent)
+    task2 = asyncio.create_task(
         execute_memory_update_agent(
             company['id'], user_id, user_message, user_profile
         )
     )
+    background_tasks_set.add(task2)
+    task2.add_done_callback(background_tasks_set.discard)
 
 
 async def execute_ui_ux_agent(
@@ -1541,33 +1599,75 @@ async def execute_ui_ux_agent(
             ai_reply_for_display,
             logo_url=company.get('logo_url'),
             user_id=user_id,
-            force_push=False,
+            force_push=((time.time() - start_time) >= 55.0),
             suggested_buttons=final_buttons
         )
+
+
+async def _show_loading_async(access_token: str, user_id: str):
+    """非同步觸發 LINE 載入中動畫」"""
+    try:
+        config = Configuration(access_token=access_token)
+        async with AsyncApiClient(config) as api_client:
+            await AsyncMessagingApi(api_client).show_loading_animation(
+                ShowLoadingAnimationRequest(chat_id=user_id, loading_seconds=60)
+            )
+    except Exception as e:
+        logger.warning(f"Async loading animation error: {e}")
+
+
+async def _async_save_and_cache(company_id: str, user_id: str, user_message: str, clean_reply: str, ai_reply: str, user_profile: dict | None, query_embedding: list[float] | None):
+    """背景非同步執行對話存檔與語意快取寫入，避免讓使用者等待」"""
+    try:
+        await run_in_threadpool(save_messages, company_id, user_id, user_message, clean_reply)
+        is_cacheable = (
+            len(user_message) >= 12 and
+            ai_reply and
+            ai_reply != "抱歉，AI 服務暫時無法使用，請稍後再試。" and
+            not user_profile
+        )
+        if is_cacheable:
+            await add_to_cache(company_id, user_message, ai_reply, query_embedding=query_embedding)
+            logger.info(f"Background cached query: '{user_message}'")
+    except Exception as e:
+        logger.warning(f"Background save_messages/add_to_cache failed: {e}")
 
 
 async def handle_text_event(company: dict, user_id: str, reply_token: str, user_message: str):
     """多代理人協調者 (Orchestrator): 協調執行 LINE 文字事件的處理流程 (非同步)"""
     start_time = time.time()
     
-    # ── 顯示輸入中動畫 ──
     try:
-        if company.get('line_access_token') and user_id:
-            config = Configuration(access_token=company['line_access_token'])
-            async with AsyncApiClient(config) as api_client:
-                await AsyncMessagingApi(api_client).show_loading_animation(
-                    ShowLoadingAnimationRequest(chat_id=user_id, loading_seconds=60)
-                )
-    except Exception as le:
-        logger.warning("Failed to show loading animation: %s", str(le))
-        
-    # 1. Router Agent 進行意圖路由與分流（處理畫圖、影片或快取命中）
-    is_handled = await route_user_intent(company, user_id, reply_token, user_message, start_time)
-    if is_handled:
-        return
-        
-    # 2. 執行 RAG QA Agent 處理知識庫檢索與 LLM 回覆
-    await execute_rag_qa_agent(company, user_id, reply_token, user_message, start_time)
+        # 1. Router Agent 進行意圖路由與分流（處理畫圖、影片或快取命中）
+        is_handled, q_emb = await route_user_intent(company, user_id, reply_token, user_message, start_time)
+        if is_handled:
+            return
+            
+        # ── 僅在快取未命中、確定要進入 LLM 時才在背景顯示輸入中動畫 ──
+        try:
+            if company.get('line_access_token') and user_id:
+                asyncio.create_task(_show_loading_async(company['line_access_token'], user_id))
+        except Exception as le:
+            logger.warning("Failed to show loading animation: %s", str(le))
+
+        # 2. 執行 RAG QA Agent 處理知識庫檢索與 LLM 回覆
+        await execute_rag_qa_agent(company, user_id, reply_token, user_message, start_time, query_embedding=q_emb)
+    
+    except Exception as e:
+        logger.error({"msg": "Global unhandled exception in handle_text_event", "error": str(e)}, exc_info=True)
+        try:
+            if company.get('line_access_token') and user_id:
+                config = Configuration(access_token=company['line_access_token'])
+                async with AsyncApiClient(config) as api_client:
+                    api = AsyncMessagingApi(api_client)
+                    await api.push_message(
+                        PushMessageRequest(
+                            to=user_id,
+                            messages=[TextMessage(text="抱歉，系統目前遇到了一點異常，請稍後再試。")]
+                        )
+                    )
+        except Exception as fallback_e:
+            logger.error({"msg": "Failed to send fallback error message", "error": str(fallback_e)})
 
 
 async def handle_quick_summary_postback(company: dict, user_id: str, query_text: str):
