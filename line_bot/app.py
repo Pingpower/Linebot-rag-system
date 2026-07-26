@@ -48,6 +48,15 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="LM Bot API")
 
+@app.on_event("startup")
+async def startup_event():
+    try:
+        from embedding_model import EmbeddingModelSingleton
+        await EmbeddingModelSingleton.preload_async()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Failed to preload EmbeddingModelSingleton: {e}")
+
 # Supabase 連線（使用 service_role key 才能繞過 RLS）
 SUPABASE_URL = os.getenv('SUPABASE_URL', '')
 SUPABASE_KEY = os.getenv('SUPABASE_SERVICE_KEY', '')
@@ -93,8 +102,8 @@ async def knowledge_update_webhook(request: Request, background_tasks: Backgroun
     # 2. 用 BackgroundTasks 非同步啟動 sync_embeddings.py 同步知識庫向量
     def run_sync():
         try:
-            script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sync_embeddings.py")
-            subprocess.run([sys.executable, script_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            import sync_embeddings
+            sync_embeddings.main()
             logger.info(f"Background task: sync_embeddings.py completed successfully.")
         except Exception as e:
             logger.error(f"Failed to run sync_embeddings.py background task: {e}")
@@ -174,12 +183,9 @@ async def knowledge_update_api(request: Request, background_tasks: BackgroundTas
 
         def run_sync():
             try:
-                script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sync_embeddings.py")
-                res = subprocess.run([sys.executable, script_path], capture_output=True, text=True)
-                if res.returncode != 0:
-                    logger.error(f"sync_embeddings.py failed with exit code {res.returncode}. Stderr: {res.stderr}")
-                else:
-                    logger.info(f"Knowledge update background sync completed successfully. Output: {res.stdout.strip()}")
+                import sync_embeddings
+                sync_embeddings.main()
+                logger.info(f"Knowledge update background sync completed successfully.")
             except Exception as e:
                 logger.error(f"Failed to run sync_embeddings.py background task after manual update: {e}")
 

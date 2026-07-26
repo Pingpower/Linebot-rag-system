@@ -1,52 +1,31 @@
 import os
 import sys
-import time
-import requests
 import re
 from dotenv import load_dotenv
 from supabase import create_client, Client
+from embedding_model import EmbeddingModelSingleton
 
 load_dotenv()
 
 SUPABASE_URL = os.getenv('SUPABASE_URL', '')
 SUPABASE_KEY = os.getenv('SUPABASE_SERVICE_KEY', '')
-GEMINI_KEY = os.getenv('GEMINI_API_KEY', '')
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     print("Error: SUPABASE_URL or SUPABASE_SERVICE_KEY not found in environment.")
     sys.exit(1)
 
-if not GEMINI_KEY:
-    print("Error: GEMINI_API_KEY not found in environment.")
-    sys.exit(1)
-
-# Initialize Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def get_embedding(text: str) -> list[float] | None:
-    """Get 768-dimension embedding using Gemini's gemini-embedding-2 model"""
-    url = "https://generativelanguage.googleapis.com/v1/models/gemini-embedding-2:embedContent"
-    payload = {
-        "model": "models/gemini-embedding-2",
-        "content": {"parts": [{"text": text}]},
-        "outputDimensionality": 768
-    }
-    headers = {"x-goog-api-key": GEMINI_KEY}
+    if not text or not text.strip():
+        return None
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=10)
-        if r.status_code == 200:
-            return r.json()['embedding']['values']
-        else:
-            print(f"Gemini API Error: {r.status_code} - {r.text}")
+        return EmbeddingModelSingleton.get_embedding_sync(text)
     except Exception as e:
         print(f"Request failed: {e}")
-    return None
-
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+        return None
 
 def smart_chunk(text: str, max_size: int = 400, overlap: int = 80) -> list[str]:
-    """Split text at semantic boundaries (paragraphs > sentences > fallback cut)."""
     if len(text) <= max_size:
         return [text]
 
@@ -71,7 +50,6 @@ def smart_chunk(text: str, max_size: int = 400, overlap: int = 80) -> list[str]:
                             chunks.append(sub_current.strip())
                         sub_current = sent
                 
-                # 如果切完 sub_current 還是超大，硬切斷
                 while len(sub_current) > max_size:
                     chunks.append(sub_current[:max_size].strip())
                     sub_current = sub_current[max_size:]
@@ -85,38 +63,17 @@ def smart_chunk(text: str, max_size: int = 400, overlap: int = 80) -> list[str]:
 
     return chunks
 
-
-class RateLimiter:
-    """Token-bucket rate limiter to enforce max calls per second."""
-    def __init__(self, max_per_second: int = 5):
-        self.interval = 1.0 / max_per_second
-        self.lock = threading.Lock()
-        self.last_call = 0.0
-
-    def wait(self):
-        sleep_time = 0
-        with self.lock:
-            now = time.time()
-            sleep_time = self.last_call + self.interval - now
-            if sleep_time > 0:
-                self.last_call += self.interval
-            else:
-                self.last_call = now
-                
-        if sleep_time > 0:
-            time.sleep(sleep_time)
-
-
-limiter = RateLimiter(max_per_second=5)
-
-
 def main():
     chunk_size = 400
     overlap = 50
 
     print("--- Phase 1: Checking for active long articles to chunk ---")
-    res = supabase.table('knowledge_base').select('id, company_id, title, content, tags').eq('is_active', True).execute()
-    rows = res.data or []
+    try:
+        res = supabase.table('knowledge_base').select('id, company_id, title, content, tags').eq('is_active', True).execute()
+        rows = res.data or []
+    except Exception as e:
+        print(f"Failed to query knowledge base: {e}")
+        return
     
     original_docs = []
     for r in rows:
@@ -140,11 +97,8 @@ def main():
             try:
                 old_chunks = supabase.table('knowledge_base').select('id').eq('company_id', company_id).contains('tags', [parent_tag]).execute()
                 old_chunk_ids = [oc['id'] for oc in old_chunks.data or []]
-                if old_chunk_ids:
-                    print(f"  Deleting {len(old_chunk_ids)} old chunks...")
-                    supabase.table('knowledge_base').delete().in_('id', old_chunk_ids).execute()
-            except Exception as delete_err:
-                print(f"  Warning deleting old chunks: {delete_err}")
+            except Exception as old_err:
+                old_chunk_ids = []
                 
             chunks = smart_chunk(content, chunk_size, overlap)
             print(f"  Split into {len(chunks)} smart chunks.")
@@ -165,17 +119,26 @@ def main():
                     'embedding': None
                 })
             
-            if new_rows:
-                supabase.table('knowledge_base').insert(new_rows).execute()
-                
-            supabase.table('knowledge_base').update({'is_active': False}).eq('id', row_id).execute()
-            chunked_count += 1
+            try:
+                if new_rows:
+                    supabase.table('knowledge_base').insert(new_rows).execute()
+                if old_chunk_ids:
+                    print(f"  Deleting {len(old_chunk_ids)} old chunks...")
+                    supabase.table('knowledge_base').delete().in_('id', old_chunk_ids).execute()
+                supabase.table('knowledge_base').update({'is_active': False}).eq('id', row_id).execute()
+                chunked_count += 1
+            except Exception as insert_err:
+                print(f"  Error inserting chunks for {title}: {insert_err}")
 
     print(f"Successfully processed and split {chunked_count} long documents.")
 
     print("\n--- Phase 2: Generating embeddings for active missing entries ---")
-    res = supabase.table('knowledge_base').select('id, title, content, embedding').eq('is_active', True).execute()
-    active_rows = res.data or []
+    try:
+        res = supabase.table('knowledge_base').select('id, title, content, embedding').eq('is_active', True).execute()
+        active_rows = res.data or []
+    except Exception as e:
+        print(f"Failed to fetch active rows for embeddings: {e}")
+        return
     
     rows_to_embed = []
     for r in active_rows:
@@ -185,28 +148,26 @@ def main():
             
     print(f"Found {len(rows_to_embed)} rows needing embeddings.")
 
-    def _embed_and_update(r):
-        limiter.wait()
+    sync_count = 0
+    # 移除 ThreadPoolExecutor, CPU bound 的 PyTorch 運算應避免線程池衝突，改為循序處理
+    for r in rows_to_embed:
         row_id = r['id']
         title = r['title']
         content = r['content']
         text_to_embed = f"標題：{title}\n內容：{content}"
+        
         emb = get_embedding(text_to_embed)
         if emb:
-            res_upd = supabase.table('knowledge_base').update({'embedding': emb}).eq('id', row_id).execute()
-            if res_upd.data:
-                print(f"  Successfully updated embedding for '{title}'.")
-                return True
-        print(f"  Failed to process '{title}'.")
-        return False
+            try:
+                res_upd = supabase.table('knowledge_base').update({'embedding': emb}).eq('id', row_id).execute()
+                if res_upd.data:
+                    print(f"  Successfully updated embedding for '{title}'.")
+                    sync_count += 1
+            except Exception as upd_e:
+                print(f"  Failed to update DB for '{title}': {upd_e}")
+        else:
+            print(f"  Failed to process '{title}'.")
 
-    sync_count = 0
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = [pool.submit(_embed_and_update, r) for r in rows_to_embed]
-        for future in as_completed(futures):
-            if future.result():
-                sync_count += 1
-            
     print(f"\nDone! Generated {sync_count} new embeddings.")
 
 if __name__ == '__main__':

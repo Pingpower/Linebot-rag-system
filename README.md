@@ -73,18 +73,18 @@ bash backup_env.sh
 
 ---
 
-## 最新架構優化與高可用性升級 (2026-07-25 更新)
+## 最新架構優化：本地端 M3E 中文 Embedding 轉移與安全預載 (2026-07-26 更新)
 
-本次升級大幅增強了系統在真實線上高併發環境下的穩定性與搜尋精準度：
+系統已將原本依賴外部 API 的 Gemini Embedding 模組，全面重構為 **本地端載入的 `moka-ai/m3e-base` 模型**（原生 768 維度），實現 100% 私有化部署與超低延遲檢索：
 
-1. **多代理人協作架構 (Multi-Agent Orchestration)**：
-   重構了意圖識別與 RAG 檢索流程。現在由 `Router Agent` 負責意圖分流，若需檢索，則交由 `Query Expansion Agent` 進行查詢重寫與標籤預測 (Intent Classifier)，最後由 `RAG QA Agent` 組合混合檢索結果進行回答。
-2. **高可用性背景處理 (Resilient Background Tasks)**：
-   LINE Webhook 要求秒回，系統全面改採 FastAPI `BackgroundTasks` 進行非同步處理。搭配 55 秒動態 `force_push` 門檻，最大化利用免費 Reply Token；並導入了**全域異常退場機制 (Global Fallback)**，在任何 API 或資料庫崩潰時主動安撫用戶。
-3. **智慧切塊與並發嵌入 (Smart Chunking & Parallel Embedding)**：
-   知識庫自動整理系統導入了語意邊界切塊 (`smart_chunk`)，優先依段落、句子邊界進行切割，並加入防爆硬切斷。透過 `ThreadPoolExecutor` 搭配 Token-bucket 速率限制器 (`RateLimiter`)，在不觸發外部 API 限流的前提下將向量化速度提升 5 倍。
-4. **pgvector + pg_trgm 混合檢索 (Hybrid Search)**：
-   在 Supabase 中實作了 RRF (Reciprocal Rank Fusion) 演算法，完美融合 Gemini 768 維向量語意相似度與 pg_trgm N-Gram 中文模糊比對，並支援 `filter_tags` 進行標籤精準過濾。
+1. **單例與執行緒安全保護 (`EmbeddingModelSingleton`)**：
+   採用雙重鎖（Async Lock + Thread Lock）與 `asyncio.to_thread` 進行 PyTorch CPU 推理，徹底解耦非同步 API 與背景同步任務，絕不阻塞 FastAPI 的 Event Loop，並防止多執行緒重複載入導致的 OOM 記憶體崩潰。
+2. **FastAPI 異步預載入 (`preload_async`)**：
+   於伺服器啟動時（`startup` 事件）同步等待模型載入完成，解決「首個請求卡頓」造成的 LINE Webhook 超時重試問題。
+3. **無 subprocess 之背景向量同步**：
+   重構 `sync_embeddings.py` 為本機引用模組，取消過去經由 `subprocess.run` 開啟子行程的運作機制，大幅節省系統記憶體開銷。
+4. **寫入安全與資料保護**：
+   重構智慧切塊與向量同步流程，改採「先寫入新碎塊、成功後才刪除舊碎塊」的事務順序，防止網路瞬斷導致知識庫文章遺失。
 
 ### 核心系統架構圖 (System Architecture)
 
@@ -114,11 +114,11 @@ graph TD
     LocalLLM -->|生成 Flex 卡片/文字| ReplyAPI[LINE Reply/Push API]
     ReplyAPI --> User
     
-    subgraph Data Pipeline
+    subgraph Data Pipeline & Local Embedding
         Admin[管理後台 新增文稿] --> Sync[sync_embeddings.py]
         Sync -->|1. 語意智慧切塊 smart_chunk| Chunks
-        Sync -->|2. 批次並發 + RateLimiter| GeminiAPI[Gemini Embedding API]
-        GeminiAPI -->|寫入向量| pgvector
+        Sync -->|2. In-Process 向量推理| LocalEmbedding[moka-ai/m3e-base (PyTorch)]
+        LocalEmbedding -->|寫入 768維 向量| pgvector
     end
 ```
 
