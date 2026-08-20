@@ -283,7 +283,7 @@ async def search_knowledge(company_id: str, query: str, limit: int = 3, required
             
         # 2. 呼叫 supabase RPC "match_knowledge_hybrid"
         # 參數: query_embedding, query_text, match_count, company_filter, filter_tags
-        def _do_rpc():
+        def _do_rpc(tags):
             return supabase.rpc(
                 'match_knowledge_hybrid',
                 {
@@ -291,13 +291,19 @@ async def search_knowledge(company_id: str, query: str, limit: int = 3, required
                     'query_text': query,
                     'match_count': limit,
                     'company_filter': company_id,
-                    'filter_tags': required_tags
+                    'filter_tags': tags
                 }
             ).execute()
-        res = await run_in_threadpool(_do_rpc)
+        res = await run_in_threadpool(_do_rpc, required_tags)
         
         docs = res.data or []
-        logger.info(f"Hybrid RAG search found {len(docs)} documents with tags filter {required_tags}.")
+        # Fallback: 若指定標籤後查無任何資料，自動降級為無標籤混合檢索，避免 LLM 標籤幻覺導致漏召回
+        if not docs and required_tags:
+            logger.info(f"Hybrid RAG search returned 0 docs with tags {required_tags}. Falling back to untagged search.")
+            fallback_res = await run_in_threadpool(_do_rpc, None)
+            docs = fallback_res.data or []
+
+        logger.info(f"Hybrid RAG search found {len(docs)} documents (tags filter applied: {required_tags if docs and required_tags else 'None/Fallback'}).")
         return [{'title': doc.get('title', ''), 'content': doc.get('content', '')} for doc in docs]
         
     except Exception as e:
@@ -359,8 +365,38 @@ def get_user_profile(company_id: str, user_id: str) -> dict:
     return {}
 
 
+def should_extract_memory(user_message: str) -> bool:
+    """判斷使用者發問是否值得觸發 LLM 進行特徵記憶提取，以大幅節省 GPU 算力與佇列開銷。"""
+    msg = (user_message or "").strip()
+    if len(msg) < 4:
+        return False
+    
+    # 常用純禮貌/操作型問候詞直接略過
+    trivial_phrases = {
+        '你好', '您好', '哈囉', '早安', '午安', '晚安', '謝謝', '感謝', '多謝',
+        '好的', '了解', '收到', 'ok', 'yes', 'no', '拜拜', '再見', '在嗎', '嗨'
+    }
+    if msg.lower() in trivial_phrases:
+        return False
+        
+    # 如果長度較短 (< 15 字)，且完全沒有包含任何個人第一人稱、居住地、偏好、身分特徵關鍵字，直接略過
+    persona_indicators = [
+        '我', '我們', '住', '歲', '家', '小孩', '兒', '女', '爸', '媽', '工作',
+        '職業', '公司', '預算', '喜歡', '偏好', '想要', '需要', '會員', '買過', '訂購',
+        '電話', '信箱', '地址', '推薦'
+    ]
+    if len(msg) < 15 and not any(kw in msg for kw in persona_indicators):
+        return False
+
+    return True
+
+
 async def execute_memory_update_agent(company_id: str, user_id: str, user_message: str, current_profile: dict):
     """Memory Update Agent: 背景執行。使用 LLM 解析使用者輸入，提取新出現的個人特徵，並合併更新至 Supabase。"""
+    # 預先節流篩選，避免無效問答佔用 GPU 推論佇列
+    if not should_extract_memory(user_message):
+        return
+
     # 限制 LLM 回覆必須是合法的 JSON 格式。
     prompt = (
         "你是一個個人特徵提取助理。\n"
@@ -371,8 +407,8 @@ async def execute_memory_update_agent(company_id: str, user_id: str, user_messag
         "1. 如果使用者的輸入中「包含新的個人特徵或更新」，請將其與當前 JSON 合併。如果是已存在的特徵但有變化，請更新它。\n"
         "2. 如果使用者的輸入「不包含任何個人特徵」或只是普通的問答/打招呼，請直接回覆原來的 JSON，不要做任何更改。\n"
         "3. 你的回覆「必須只能是一個合法的 JSON 字串」，不要有任何 Markdown 標記（如 ```json ... ```），不要有任何解釋文字。\n"
-        "4. 請保持 JSON 鍵值對簡明易懂（例如：{\"location\": \"屏東\", \"children_count\": 2}）。\n"
-        "輸出範例：{\"location\": \"屏東\", \"children_count\": 2}"
+        "4. 請保持 JSON 鍵值對簡明易懂（例如：{\"location\": \"台北\", \"membership_tier\": \"VIP\"}）。\n"
+        "輸出範例：{\"location\": \"台北\", \"membership_tier\": \"VIP\"}"
     )
     
     try:
@@ -430,13 +466,13 @@ async def execute_query_expansion_agent(user_message: str, history: list[dict]) 
     
     prompt = (
         "你是一個查詢重寫與標籤路由助理。\n"
-        "請分析用戶的最新發問，結合上下文，將其展開成適合搜尋知識庫的長查詢句，並且判斷是否需要篩選特定的分類標籤（如：津貼、身心障礙、長照、生育、可可、內部等）。\n\n"
+        "請分析用戶的最新發問，結合上下文，將其展開成適合搜尋知識庫的長查詢句，並且判斷是否需要篩選特定的分類標籤（如：產品規格、服務收費、售後服務、使用教學、常見問題等）。\n\n"
         f"{history_context}\n"
         f"【用戶最新發問】：\"{user_message}\"\n\n"
         "【任務指引】：\n"
         "1. 請優先以 JSON 格式輸出：{\"query\": \"展開後的完整發問\", \"tags\": [\"標籤1\", \"標籤2\"]}，若無特定標籤請設為 null。\n"
         "2. 不要加上任何你的解釋、問候語、或引號；若無法輸出 JSON，直接輸出擴寫後的查詢文字本身亦可。\n"
-        "3. 如果該發問已經足夠清晰具體（如「屏東縣身心障礙者租金補助如何辦理」），請直接原樣輸出其 query，不要做無意義的展開。\n"
+        "3. 如果該發問已經足夠清晰具體（如「退換貨流程如何辦理」），請直接原樣輸出其 query，不要做無意義的展開。\n"
         "請直接輸出結果："
     )
     
@@ -1090,8 +1126,8 @@ def extract_suggested_options(ai_reply: str) -> list[dict]:
     
     Looks for patterns like:
     👉 您可能還想知道：
-    1. 育兒津貼申請資格
-    2. 低收入戶補助金額
+    1. 方案費用說明
+    2. 退換貨申請資格
     
     Returns a list of button dicts: [{"label": "...", "text": "..."}]
     """
@@ -1333,20 +1369,20 @@ async def execute_rag_qa_agent(company: dict, user_id: str, reply_token: str, us
         run_in_threadpool(get_user_profile, company['id'], user_id)
     )
 
-    # 限制對話歷史總字數不超過 500 字，避免 Prefill 膨脹，但強制保留最新的一筆
+    # 限制對話歷史總字數不超過 1000 字，避免 Prefill 膨脹，但強制保留最新的一筆
     total_history_len = 0
     truncated_history = []
     for i, msg in enumerate(reversed(history or [])):
         content = msg.get("content") or ""
         # 最新的一筆訊息強制保留，如果太長則進行截斷
         if i == 0:
-            if len(content) > 500:
+            if len(content) > 1000:
                 msg = msg.copy()
-                msg["content"] = content[:500] + "..."
+                msg["content"] = content[:1000] + "..."
             content_len = len(msg.get("content") or "")
         else:
             content_len = len(content)
-            if total_history_len + content_len > 500:
+            if total_history_len + content_len > 1000:
                 break
         
         truncated_history.append(msg)
@@ -1386,14 +1422,14 @@ async def execute_rag_qa_agent(company: dict, user_id: str, reply_token: str, us
         profile_str = ", ".join(f"{k}: {v}" for k, v in user_profile.items())
         system_prompt += (
             f"\n\n【關於此用戶的已知個人背景資訊】：\n{profile_str}\n"
-            "請在回答時，優先主動結合此背景資訊，提供個人化的回覆（例如：若已知用戶有小孩，回答補助時應主動針對其有小孩的條件回答）。"
+            "請在回答時，優先主動結合此背景資訊，提供個人化的回覆（例如：若已知用戶的特定需求、身分或偏好，應主動針對該條件提供精確推薦與回答）。"
         )
 
     context = ""
     if docs:
         raw_context = "\n\n".join(f"【{d['title']}】\n{d['content']}" for d in docs)
-        if len(raw_context) > 1200:
-            context = raw_context[:1200] + "\n\n（...部分資料已因長度限制截斷...）"
+        if len(raw_context) > 2500:
+            context = raw_context[:2500] + "\n\n（...部分資料已因長度限制截斷...）"
             logger.info(f"RAG context truncated from {len(raw_context)} to {len(context)} chars")
         else:
             context = raw_context
@@ -1424,36 +1460,32 @@ async def execute_rag_qa_agent(company: dict, user_id: str, reply_token: str, us
             system_prompt += f"\n\n以下是公司相關資料，請優先參考：\n\n{context}"
 
     company_contact = company.get('name', '相關單位')
-    # Unified response style instruction — Direct answer without CoT for fast response
+    # Unified response style instruction — Rich, structured and clear answers
     style_instruction = (
-        "\n\n【回覆規則 — 嚴格遵守】\n"
-        "■ 首輪直答，禁止空泛\n"
-        "用戶問任何政策、福利、活動、補助時，首輪回覆必須：\n"
-        "• 用 1 句話直接說明主題\n"
-        "• 列出至少 2-3 個具體項目名稱或方案\n"
-        "• 嚴禁只給歡迎詞或「我來幫您了解」之類的廢話\n\n"
-        "■ 精準數值化\n"
-        "用戶問資格、條件、細節時：\n"
-        "• 必須給出明確數值（年齡、設籍時間、收入門檻、截止日期）\n"
-        f"• 若資料中無此數值，直接說「此項未收錄，建議致電 {company_contact} 洽詢」\n"
-        "• 嚴禁「依各類別有所不同」「視情況而定」等模糊用語\n\n"
-        "■ 排版規則\n"
-        "• 用 • 條列式呈現，每點一行\n"
-        "• 重點用【】標示\n"
-        "• 回覆控制在 250 字以內\n"
-        "• 嚴禁 Markdown 符號（#, **, `）\n\n"
+        "\n\n【回覆規則 — 嚴格遵守（手機閱讀最佳化）】\n"
+        "■ 語氣風格\n"
+        "• 用親切、溫暖的口吻，像一個熟悉業務的好朋友在幫忙解答\n"
+        "• 適度使用 emoji（如 ✅ 📌 💡）讓訊息更活潑，但不要過度堆疊\n"
+        "• 可以用「您好～」「沒問題！」「這部分幫您整理一下～」等自然的開場\n"
+        "• 結尾可加一句暖心的話，如「有任何問題隨時問我喔！」「希望有幫到您～」\n"
+        "• 嚴禁機械式回答，要讓用戶感覺在跟「人」對話而非機器\n\n"
+        "■ 精簡直答\n"
+        "• 開場後直接給出結論或答案，不要鋪陳\n"
+        "• 用 • 條列最多 3 個關鍵重點（含具體數值：金額、日期、資格條件）\n"
+        f"• 若資料不足，友善告知「這部分建議直接打給 {company_contact} 確認比較準確喔～」\n"
+        "• 全文控制在 200 字以內（不含引導選項），寧可精簡也不要冗長\n\n"
+        "■ 格式規範\n"
+        "• 重要數字或名稱用【】標示\n"
+        "• 嚴禁使用 Markdown 語法（#, **, `）\n"
+        "• 不要重複用戶問題、不要說「讓我為您查詢」\n\n"
         "■ 引導選項（每次必須提供）\n"
-        "每次回覆結尾必須附上：\n"
+        "回覆結尾附上：\n"
         "---\n"
         "👉 您可能還想知道：\n"
-        "1. [具體選項A]\n"
-        "2. [具體選項B]\n"
-        "3. [具體選項C]\n\n"
-        "選項必須與當前話題直接相關，禁止放「聯繫客服」等萬用選項。\n\n"
-        "■ 禁止事項\n"
-        "• 不要重複用戶的問題\n"
-        "• 不要說「讓我為您查詢」「請稍等」\n"
-        "• 不要在 [FLEX_CARD] 外部輸出 any JSON\n"
+        "1. [相關選項A]\n"
+        "2. [相關選項B]\n"
+        "3. [相關選項C]\n\n"
+        "選項必須與當前話題直接相關。\n"
     )
     system_prompt += style_instruction
 
@@ -1463,12 +1495,12 @@ async def execute_rag_qa_agent(company: dict, user_id: str, reply_token: str, us
     messages.extend(history)
     messages.append({"role": "user", "content": user_message})
 
-    # 5. 呼叫本地 LLM (max_tokens 降至 800 加速)
+    # 5. 呼叫本地 LLM (max_tokens=600 配合精簡回覆風格)
     try:
         resp = await call_llm_with_retry(
             messages=messages,
             temperature=0.2,
-            max_tokens=1500,
+            max_tokens=600,
             timeout=45.0
         )
         choice = resp.choices[0]
@@ -1569,16 +1601,22 @@ async def execute_ui_ux_agent(
     if docs:
         query_prefix = user_message[:10].strip()
         combined_content = " ".join(d['content'] for d in docs)
-        has_docs = any(kw in combined_content for kw in ['文件', '戶籍謄本', '證明', '身分證', '申請書', '應備', '所需'])
-        has_qualifications = any(kw in combined_content for kw in ['資格', '條件', '符合', '標準', '門檻'])
-        has_amount = any(kw in combined_content for kw in ['金額', '補助', '元', '津貼', '費用'])
+        has_docs = any(kw in combined_content for kw in ['文件', '資料', '證明', '身分證', '申請書', '應備', '所需', '必備', '準備'])
+        has_qualifications = any(kw in combined_content for kw in ['資格', '條件', '符合', '標準', '門檻', '適用', '對象'])
+        has_amount = any(kw in combined_content for kw in ['金額', '費用', '價格', '收費', '補助', '元', '津貼', '定價', '方案'])
+        has_process = any(kw in combined_content for kw in ['流程', '步驟', '如何申請', '如何購買', '退換貨', '維修', '保固', '退費'])
+        has_booking = any(kw in combined_content for kw in ['營業時間', '門市', '分店', '預約', '掛號', '訂位', '地址', '位置'])
  
         if has_qualifications:
-            rag_buttons.append({"label": "✅ 申請資格", "text": f"{query_prefix} 申請資格"})
-        if has_docs and len(rag_buttons) < 3:
-            rag_buttons.append({"label": "📄 應備文件", "text": f"{query_prefix} 應備文件"})
+            rag_buttons.append({"label": "✅ 適用條件", "text": f"{query_prefix} 適用條件"})
         if has_amount and len(rag_buttons) < 3:
-            rag_buttons.append({"label": "💰 補助金額", "text": f"{query_prefix} 補助金額"})
+            rag_buttons.append({"label": "💰 費用說明", "text": f"{query_prefix} 費用說明"})
+        if has_process and len(rag_buttons) < 3:
+            rag_buttons.append({"label": "🔄 服務流程", "text": f"{query_prefix} 服務流程"})
+        if has_booking and len(rag_buttons) < 3:
+            rag_buttons.append({"label": "📍 營業與預約", "text": f"{query_prefix} 營業與預約"})
+        if has_docs and len(rag_buttons) < 3:
+            rag_buttons.append({"label": "📄 準備資料", "text": f"{query_prefix} 準備資料"})
              
         if len(docs) >= 2 and len(rag_buttons) < 3:
             second_title = docs[1]['title']
@@ -1720,16 +1758,22 @@ async def handle_quick_summary_postback(company: dict, user_id: str, query_text:
         # 推導常見的「文件 / 資格 / 補助」衍生按鈕
         content_lower = primary['content'].lower()
         combined_content = " ".join(d['content'] for d in docs)
-        has_docs = any(kw in combined_content for kw in ['文件', '戶籍謄本', '證明', '身分證', '申請書'])
-        has_qualifications = any(kw in combined_content for kw in ['資格', '條件', '符合', '標準', '門檻'])
-        has_amount = any(kw in combined_content for kw in ['金額', '補助', '元', '津貼', '費用'])
+        has_docs = any(kw in combined_content for kw in ['文件', '資料', '證明', '身分證', '申請書', '應備', '所需', '必備', '準備'])
+        has_qualifications = any(kw in combined_content for kw in ['資格', '條件', '符合', '標準', '門檻', '適用', '對象'])
+        has_amount = any(kw in combined_content for kw in ['金額', '費用', '價格', '收費', '補助', '元', '津貼', '定價', '方案'])
+        has_process = any(kw in combined_content for kw in ['流程', '步驟', '如何申請', '如何購買', '退換貨', '維修', '保固', '退費'])
+        has_booking = any(kw in combined_content for kw in ['營業時間', '門市', '分店', '預約', '掛號', '訂位', '地址', '位置'])
 
-        if has_qualifications:
-            buttons.append({"label": "✅ 申請資格", "text": f"{query_text[:10]} 申請資格"})
-        if has_docs and len(buttons) < 3:
-            buttons.append({"label": "📄 應備文件", "text": f"{query_text[:10]} 應備文件"})
+        if has_qualifications and len(buttons) < 3:
+            buttons.append({"label": "✅ 適用條件", "text": f"{query_text[:10]} 適用條件"})
         if has_amount and len(buttons) < 3:
-            buttons.append({"label": "💰 補助金額", "text": f"{query_text[:10]} 補助金額"})
+            buttons.append({"label": "💰 費用說明", "text": f"{query_text[:10]} 費用說明"})
+        if has_process and len(buttons) < 3:
+            buttons.append({"label": "🔄 服務流程", "text": f"{query_text[:10]} 服務流程"})
+        if has_booking and len(buttons) < 3:
+            buttons.append({"label": "📍 營業與預約", "text": f"{query_text[:10]} 營業與預約"})
+        if has_docs and len(buttons) < 3:
+            buttons.append({"label": "📄 準備資料", "text": f"{query_text[:10]} 準備資料"})
 
         # 若衍生按鈕不足，加上第二筆知識庫條目的標題作為探索入口
         if len(docs) >= 2 and len(buttons) < 3:
@@ -1824,7 +1868,7 @@ async def handle_postback_event(company: dict, user_id: str, reply_token: str, p
     logger.info(f"Received Postback data: {postback_data} for user: {user_id}")
     
     try:
-        # 解析 query string 格式 (例如 action=rag_query&text=老莫介紹)
+        # 解析 query string 格式 (例如 action=rag_query&text=服務介紹)
         params = urllib.parse.parse_qs(postback_data)
         action = params.get('action', [''])[0]
     except Exception:

@@ -41,7 +41,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$WORKSPACE
-ExecStart=$LLAMA_BIN --model $(cat $MODEL_CONFIG) --host 127.0.0.1 --port 8080 --ctx-size 4096 --n-gpu-layers 99 --threads 6 --threads-batch 6 --parallel 2 --cache-type-k q8_0 --cache-type-v q8_0 --no-mmap --mlock --flash-attn --log-disable
+ExecStart=$LLAMA_BIN --model $(cat $MODEL_CONFIG) --host 127.0.0.1 --port 8080 --ctx-size 4096 --n-gpu-layers 99 --threads 6 --threads-batch 6 --parallel 2 --cache-type-k q8_0 --cache-type-v q8_0 --no-mmap --mlock --flash-attn on --log-disable
 Restart=always
 RestartSec=5
 StandardOutput=append:$WORKSPACE/llama.log

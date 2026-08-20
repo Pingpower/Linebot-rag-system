@@ -286,7 +286,7 @@
               </div>
               <div class="result-actions mt-4" style="display: flex; gap: 10px; justify-content: flex-end;">
                 <button class="btn btn-outline" id="btn-animate-image" onclick="animateGeneratedImage()">🎬 將此圖片轉為短影片</button>
-                <button class="btn btn-primary" onclick="saveAsAsset()">💾 儲存為公司資產圖卡</button>
+                <button class="btn btn-primary" onclick="saveAsAsset(this)">💾 儲存為公司資產圖卡</button>
               </div>
             </div>
           </div>
@@ -314,7 +314,7 @@
                 <video id="generated-video-preview" src="" controls style="max-width: 100%; border-radius: 8px; box-shadow: var(--shadow);"></video>
               </div>
               <div class="result-actions mt-4" style="display: flex; justify-content: flex-end;">
-                <button class="btn btn-primary" onclick="copyVideoUrl()">📋 複製影片連結</button>
+                <button class="btn btn-primary" onclick="copyVideoUrl(this)">📋 複製影片連結</button>
               </div>
             </div>
           </div>
@@ -1083,9 +1083,14 @@
           const tasks = await res.json();
           
           const container = document.getElementById('download-tasks-list');
+          if (!container) return;
+          
           const keys = Object.keys(tasks);
           
-          document.getElementById('active-downloads-count').textContent = `${keys.filter(k => tasks[k].status === 'downloading').length} 個任務`;
+          const activeDownloadsCount = document.getElementById('active-downloads-count');
+          if (activeDownloadsCount) {
+              activeDownloadsCount.textContent = `${keys.filter(k => tasks[k].status === 'downloading').length} 個任務`;
+          }
           
           if (keys.length === 0) {
               container.innerHTML = '<div class="text-center py-8 text-muted" id="no-downloads-placeholder">目前沒有進行中的下載任務</div>';
@@ -1104,19 +1109,19 @@
               let statusText = "";
               let barColor = "var(--warn)";
               if (task.status === "downloading") {
-                  statusText = `下載中 (${task.speed})`;
+                  statusText = `下載中 (${escapeHTML(task.speed)})`;
               } else if (task.status === "completed") {
                   statusText = "已完成 (請重新整理頁面以切換模型)";
                   barColor = "var(--success)";
               } else if (task.status === "failed") {
-                  statusText = `下載失敗: ${task.error}`;
+                  statusText = `下載失敗: ${escapeHTML(task.error)}`;
                   barColor = "var(--danger)";
               }
               
                return `
                   <div class="download-item" style="padding: 14px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 8px;">
                       <div class="download-header" style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 0;">
-                          <span style="word-break: break-all; font-size: 13px; font-weight: 600; color: var(--text); flex: 1; text-align: left;">${fname}</span>
+                          <span style="word-break: break-all; font-size: 13px; font-weight: 600; color: var(--text); flex: 1; text-align: left;">${escapeHTML(fname)}</span>
                           <span style="color: ${barColor}; font-size: 13px; font-weight: 600; flex-shrink: 0;">${task.percent}%</span>
                       </div>
                       <div class="download-progress-bar-container" style="height: 6px; background: var(--border); border-radius: 99px; overflow: hidden; margin-bottom: 0;">
@@ -1128,7 +1133,9 @@
                               <span>(${task.downloaded_mb}MB / ${task.total_mb}MB)</span>
                           </div>
                           <button
-                              onclick="clearTask('${k.replace(/'/g, "\\'")}', '${task.status}')"
+                              onclick="clearTask(this)"
+                              data-task-id="${escapeHTML(k)}"
+                              data-status="${escapeHTML(task.status)}"
                               style="padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; transition: all .15s; border: 1px solid ${task.status === 'downloading' ? 'rgba(239,68,68,0.35)' : 'rgba(255,255,255,0.15)'}; background: ${task.status === 'downloading' ? 'rgba(239,68,68,0.08)' : 'rgba(255,255,255,0.05)'}; color: ${task.status === 'downloading' ? 'var(--danger)' : 'var(--text-muted)'}; display: flex; align-items: center; gap: 4px; line-height: 1.2;"
                           >
                               ${task.status === 'downloading' ? '❌ 取消下載' : '🧹 清除任務'}
@@ -1159,7 +1166,9 @@
   }
 
   // Clear a single download task
-  async function clearTask(taskId, status) {
+  async function clearTask(btn) {
+      const taskId = btn.dataset.taskId;
+      const status = btn.dataset.status;
       if (status === 'downloading') {
           if (!confirm("此模型正在下載中，確定要取消下載並清除暫存檔嗎？")) {
               return;
@@ -1168,7 +1177,8 @@
       try {
           const res = await fetch(`/api/models/download/clear?task_id=${encodeURIComponent(taskId)}`, { method: 'DELETE' });
           const data = await res.json();
-          if (data.error) { alert(data.error); return; }
+          if (data.error) { showToast(data.error, "error"); return; }
+          showToast(status === 'downloading' ? "已取消下載任務" : "已清除任務記錄", "info");
           updateDownloadProgress(); // Refresh display immediately
       } catch (err) {
           console.error('clearTask failed:', err);
@@ -1180,7 +1190,8 @@
       try {
           const res = await fetch('/api/models/download/clear', { method: 'DELETE' });
           const data = await res.json();
-          if (data.error) { alert(data.error); return; }
+          if (data.error) { showToast(data.error, "error"); return; }
+          showToast("已清除所有完成與失敗的下載任務", "info");
           updateDownloadProgress();
           // Hide the clear button if nothing remains
           const clearBtn = document.getElementById('btn-clear-downloads');
@@ -1189,6 +1200,8 @@
           console.error('clearAllFinished failed:', err);
       }
   }
+
+
 
   // ── AI Sandbox 沙盒生成 ──
 
@@ -1300,22 +1313,25 @@
   }
 
   // 載入 HF Token 配置狀態
+  // 載入 HF Token 配置狀態
   async function loadHFTokenStatus() {
       try {
           const res = await fetch('/api/system/config');
           const data = await res.json();
           const badge = document.getElementById('hf-status-badge');
           const input = document.getElementById('hf-token-input');
-          if (data.has_token) {
-              badge.textContent = "已配置";
-              badge.style.background = "rgba(34, 197, 94, 0.15)";
-              badge.style.color = "var(--success)";
-              input.placeholder = `已設定憑證：${data.masked_token} (輸入新值將會覆蓋)`;
-          } else {
-              badge.textContent = "未配置";
-              badge.style.background = "rgba(239, 68, 68, 0.15)";
-              badge.style.color = "var(--danger)";
-              input.placeholder = "尚未設定憑證，請輸入您的 hf_... 憑證";
+          if (badge && input) {
+              if (data.has_token) {
+                  badge.textContent = "已配置";
+                  badge.style.background = "rgba(34, 197, 94, 0.15)";
+                  badge.style.color = "var(--success)";
+                  input.placeholder = `已設定憑證：${data.masked_token} (輸入新值將會覆蓋)`;
+              } else {
+                  badge.textContent = "未配置";
+                  badge.style.background = "rgba(239, 68, 68, 0.15)";
+                  badge.style.color = "var(--danger)";
+                  input.placeholder = "尚未設定憑證，請輸入您的 hf_... 憑證";
+              }
           }
       } catch (err) {
           console.error("Load HF token status failed:", err);
@@ -1326,27 +1342,36 @@
   function toggleHFVisibility() {
       const input = document.getElementById('hf-token-input');
       const btn = document.getElementById('btn-toggle-hf');
-      if (input.type === 'password') {
-          input.type = 'text';
-          btn.textContent = "🙈 隱藏";
-      } else {
-          input.type = 'password';
-          btn.textContent = "👁️ 顯示";
+      if (input && btn) {
+          if (input.type === 'password') {
+              input.type = 'text';
+              btn.textContent = "🙈 隱藏";
+          } else {
+              input.type = 'password';
+              btn.textContent = "👁️ 顯示";
+          }
       }
   }
 
   // 儲存 HF Token 到伺服器
-  async function saveHFToken() {
+  async function saveHFToken(btn) {
       const input = document.getElementById('hf-token-input');
-      const token = input.value.trim();
+      const token = input ? input.value.trim() : '';
       if (!token) {
-          alert("請輸入有效的 Hugging Face 憑證！");
+          showToast("請輸入有效的 Hugging Face 憑證！", "warn");
           return;
       }
       if (!token.startsWith('hf_')) {
           if (!confirm("警告：標準的 Hugging Face 憑證通常以 'hf_' 開頭，您確要儲存目前的憑證嗎？")) {
               return;
           }
+      }
+
+      const currentBtn = btn || (window.event && window.event.target) || document.querySelector('button[onclick*="saveHFToken"]');
+      const originalText = currentBtn ? currentBtn.innerHTML : '';
+      if (currentBtn) {
+          currentBtn.disabled = true;
+          currentBtn.innerHTML = '⚡ 儲存中...';
       }
 
       try {
@@ -1357,20 +1382,27 @@
           });
           const data = await res.json();
           if (data.error) {
-              alert(`儲存失敗: ${data.error}`);
+              showToast(`儲存失敗: ${data.error}`, "error");
           } else {
-              alert(data.msg);
-              input.value = "";
+              showToast(data.msg, "success");
+              if (input) input.value = "";
               loadHFTokenStatus();
           }
-    } catch (err) {
-          alert("請求儲存金鑰失敗，請稍候重試！");
+      } catch (err) {
+          showToast("請求儲存金鑰失敗，請稍候重試！", "error");
+      } finally {
+          if (currentBtn) {
+              currentBtn.disabled = false;
+              currentBtn.innerHTML = originalText;
+          }
       }
   }
 
   // 知識庫 LLM 供應商下拉選單切換時的 UI 動態顯示/隱藏
   function onKnowledgeProviderChange() {
       const select = document.getElementById('knowledge-provider-select');
+      if (!select) return;
+      
       const provider = select.value;
       
       // 先隱藏所有外部 API 設定區塊
@@ -1378,24 +1410,30 @@
       groups.forEach(g => g.style.display = 'none');
       
       // 根據供應商顯示特定區塊
-      if (provider === 'gemini') {
-          document.getElementById('config-group-gemini').style.display = 'flex';
-      } else if (provider === 'nvidia') {
-          document.getElementById('config-group-nvidia').style.display = 'flex';
-      } else if (provider === 'openrouter') {
-          document.getElementById('config-group-openrouter').style.display = 'flex';
+      const geminiGroup = document.getElementById('config-group-gemini');
+      const nvidiaGroup = document.getElementById('config-group-nvidia');
+      const openrouterGroup = document.getElementById('config-group-openrouter');
+      
+      if (provider === 'gemini' && geminiGroup) {
+          geminiGroup.style.display = 'flex';
+      } else if (provider === 'nvidia' && nvidiaGroup) {
+          nvidiaGroup.style.display = 'flex';
+      } else if (provider === 'openrouter' && openrouterGroup) {
+          openrouterGroup.style.display = 'flex';
       }
       
       // 更新 badge 狀態文字
       const badge = document.getElementById('knowledge-status-badge');
-      if (provider === 'local') {
-          badge.textContent = "本地 (llama-server)";
-          badge.style.background = "rgba(99, 102, 241, 0.15)";
-          badge.style.color = "var(--primary)";
-      } else {
-          badge.textContent = `雲端 (${provider.toUpperCase()})`;
-          badge.style.background = "rgba(16, 185, 129, 0.15)";
-          badge.style.color = "var(--success)";
+      if (badge) {
+          if (provider === 'local') {
+              badge.textContent = "本地 (llama-server)";
+              badge.style.background = "rgba(99, 102, 241, 0.15)";
+              badge.style.color = "var(--primary)";
+          } else {
+              badge.textContent = `雲端 (${provider.toUpperCase()})`;
+              badge.style.background = "rgba(16, 185, 129, 0.15)";
+              badge.style.color = "var(--success)";
+          }
       }
   }
 
@@ -1410,13 +1448,26 @@
           }
           
           // 填入資料
-          document.getElementById('knowledge-provider-select').value = data.provider;
-          document.getElementById('gemini-key-input').value = data.gemini_key || "";
-          document.getElementById('gemini-model-input').value = data.gemini_model || "gemini-2.5-flash";
-          document.getElementById('nvidia-key-input').value = data.nvidia_key || "";
-          document.getElementById('nvidia-model-input').value = data.nvidia_model || "meta/llama-3.1-405b-instruct";
-          document.getElementById('openrouter-key-input').value = data.openrouter_key || "";
-          document.getElementById('openrouter-model-input').value = data.openrouter_model || "google/gemini-2.5-flash";
+          const providerSelect = document.getElementById('knowledge-provider-select');
+          if (providerSelect) providerSelect.value = data.provider;
+          
+          const geminiKeyInput = document.getElementById('gemini-key-input');
+          if (geminiKeyInput) geminiKeyInput.value = data.gemini_key || "";
+          
+          const geminiModelInput = document.getElementById('gemini-model-input');
+          if (geminiModelInput) geminiModelInput.value = data.gemini_model || "gemini-2.5-flash";
+          
+          const nvidiaKeyInput = document.getElementById('nvidia-key-input');
+          if (nvidiaKeyInput) nvidiaKeyInput.value = data.nvidia_key || "";
+          
+          const nvidiaModelInput = document.getElementById('nvidia-model-input');
+          if (nvidiaModelInput) nvidiaModelInput.value = data.nvidia_model || "meta/llama-3.1-405b-instruct";
+          
+          const openrouterKeyInput = document.getElementById('openrouter-key-input');
+          if (openrouterKeyInput) openrouterKeyInput.value = data.openrouter_key || "";
+          
+          const openrouterModelInput = document.getElementById('openrouter-model-input');
+          if (openrouterModelInput) openrouterModelInput.value = data.openrouter_model || "google/gemini-2.5-flash";
           
           // 觸發 UI 隱藏/顯示更新
           onKnowledgeProviderChange();
@@ -1429,36 +1480,51 @@
   function toggleProviderKeyVisibility(provider) {
       const input = document.getElementById(`${provider}-key-input`);
       const btn = document.getElementById(`btn-toggle-${provider}`);
-      if (input.type === 'password') {
-          input.type = 'text';
-          btn.textContent = "🙈 隱藏";
-      } else {
-          input.type = 'password';
-          btn.textContent = "👁️ 顯示";
+      if (input && btn) {
+          if (input.type === 'password') {
+              input.type = 'text';
+              btn.textContent = "🙈 隱藏";
+          } else {
+              input.type = 'password';
+              btn.textContent = "👁️ 顯示";
+          }
       }
   }
 
   // 儲存設定到後端
-  async function saveKnowledgeConfig() {
-      const provider = document.getElementById('knowledge-provider-select').value;
-      const gemini_key = document.getElementById('gemini-key-input').value.trim();
-      const gemini_model = document.getElementById('gemini-model-input').value.trim();
-      const nvidia_key = document.getElementById('nvidia-key-input').value.trim();
-      const nvidia_model = document.getElementById('nvidia-model-input').value.trim();
-      const openrouter_key = document.getElementById('openrouter-key-input').value.trim();
-      const openrouter_model = document.getElementById('openrouter-model-input').value.trim();
+  async function saveKnowledgeConfig(btn) {
+      const select = document.getElementById('knowledge-provider-select');
+      const provider = select ? select.value : 'local';
+      
+      const geminiKeyInput = document.getElementById('gemini-key-input');
+      const gemini_key = geminiKeyInput ? geminiKeyInput.value.trim() : '';
+      
+      const geminiModelInput = document.getElementById('gemini-model-input');
+      const gemini_model = geminiModelInput ? geminiModelInput.value.trim() : '';
+      
+      const nvidiaKeyInput = document.getElementById('nvidia-key-input');
+      const nvidia_key = nvidiaKeyInput ? nvidiaKeyInput.value.trim() : '';
+      
+      const nvidiaModelInput = document.getElementById('nvidia-model-input');
+      const nvidia_model = nvidiaModelInput ? nvidiaModelInput.value.trim() : '';
+      
+      const openrouterKeyInput = document.getElementById('openrouter-key-input');
+      const openrouter_key = openrouterKeyInput ? openrouterKeyInput.value.trim() : '';
+      
+      const openrouterModelInput = document.getElementById('openrouter-model-input');
+      const openrouter_model = openrouterModelInput ? openrouterModelInput.value.trim() : '';
       
       // 基本驗證
       if (provider === 'gemini' && !gemini_key) {
-          alert("您選擇了 Gemini 供應商，請輸入 API Key！");
+          showToast("您選擇了 Gemini 供應商，請輸入 API Key！", "warn");
           return;
       }
       if (provider === 'nvidia' && !nvidia_key) {
-          alert("您選擇了 NVIDIA NIM 供應商，請輸入 API Key！");
+          showToast("您選擇了 NVIDIA NIM 供應商，請輸入 API Key！", "warn");
           return;
       }
       if (provider === 'openrouter' && !openrouter_key) {
-          alert("您選擇了 OpenRouter 供應商，請輸入 API Key！");
+          showToast("您選擇了 OpenRouter 供應商，請輸入 API Key！", "warn");
           return;
       }
 
@@ -1472,6 +1538,13 @@
           openrouter_model
       };
 
+      const currentBtn = btn || (window.event && window.event.target) || document.querySelector('button[onclick*="saveKnowledgeConfig"]');
+      const originalText = currentBtn ? currentBtn.innerHTML : '';
+      if (currentBtn) {
+          currentBtn.disabled = true;
+          currentBtn.innerHTML = '⚡ 儲存中...';
+      }
+
       try {
           const res = await fetch('/api/system/knowledge-config', {
               method: 'POST',
@@ -1480,13 +1553,18 @@
           });
           const data = await res.json();
           if (data.error) {
-              alert(`儲存失敗: ${data.error}`);
+              showToast(`儲存失敗: ${data.error}`, "error");
           } else {
-              alert(data.msg);
+              showToast(data.msg, "success");
               loadKnowledgeConfig(); // 重新載入以顯示遮蔽後的金鑰
           }
       } catch (err) {
-          alert("發送儲存設定失敗，請確認網路連線！");
+          showToast("發送儲存設定失敗，請確認網路連線！", "error");
+      } finally {
+          if (currentBtn) {
+              currentBtn.disabled = false;
+              currentBtn.innerHTML = originalText;
+          }
       }
   }
 </script>

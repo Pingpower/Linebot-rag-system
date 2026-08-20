@@ -231,7 +231,7 @@ LINE Bot (位於 `line_bot/app.py`) 整合了檢索增強生成 (RAG) 機制。�
    - **此機制設有彈性，非死板硬限制**：若用戶在 3 層後繼續提問或進行接續問答，系統仍會繼續提供親切主動的引導，並正常拼裝 `[FLEX_CARD]` 互動圖卡按鈕引導用戶進一步了解，確保接續問答不會退回為無 Flex 樣式的純文字。
 2. **混合式 Flex Message 解析**：
    - 系統支援原生官方的 LINE Flex Message 結構。當 `[FLEX_CARD]` 內的 JSON 包含官方原生的 `"type": "bubble"` 或 `"type": "carousel"` 時，解析引擎會直接套用 LINE SDK 原生渲染，此舉成功支援了**不帶按鈕的精緻 Silent Card** 以及**橫向滑動的 Carousel 輪播卡片**。
-   - 若為簡易格式（`imageUrl`, `buttons`），則自動套用預設的阿全村長紫色主題 Bubble。
+   - 若為簡易格式（`imageUrl`, `buttons`），則自動套用預設的紫色主題 Bubble。
 3. **對話歷史儲存乾淨化**：
    - 寫入 Supabase 資料庫的對話歷史紀錄已全面進行「標籤與 Markdown 符號過濾」：系統會在儲存前將 `[FLEX_CARD]...[/FLEX_CARD]` 與 Markdown 星號 `**`、`##` 等符號完全抹除，確保儲存的文字紀錄百分之百乾淨，便於後台管理員檢視。
 4. **LLaMA Server 連線防崩潰保護**：

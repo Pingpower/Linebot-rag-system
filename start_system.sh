@@ -48,7 +48,18 @@ manage_models() {
         echo -e "  \e[1;31m[d]\e[0m 刪除模型"
         echo -e "  \e[1;32m[數字]\e[0m 啟動選定模型"
         echo ""
-        read -p "請輸入選擇: " choice
+        
+        if ! read -t 10 -p "請輸入選擇: " choice; then
+            echo ""
+            echo -e "\e[1;33m[系統] 逾時未輸入，自動載入預設模型...\e[0m"
+            if [ -f "$MODELS_DIR/gemma-4-12b-it-qat-q4_0.gguf" ]; then
+                SELECTED_MODEL="$MODELS_DIR/gemma-4-12b-it-qat-q4_0.gguf"
+            else
+                SELECTED_MODEL="${MODELS[0]}"
+            fi
+            echo -e "\n載入模型: \e[1;36m$(basename "$SELECTED_MODEL")\e[0m\n"
+            break
+        fi
 
         # 刪除模式
         if [[ "$choice" == "d" || "$choice" == "D" ]]; then
@@ -134,7 +145,7 @@ trap cleanup SIGINT SIGTERM
 watchdog_llama() {
     while true; do
         echo -e "\e[1;34m[Watchdog] 啟動 Llama-server...\e[0m"
-        $LLAMA_SERVER -m "$SELECTED_MODEL" --host 0.0.0.0 --port 8080 --ctx-size 8192 --n-gpu-layers 99 --threads 6 --threads-batch 6 --parallel 2 --cache-type-k q8_0 --cache-type-v q8_0 --no-mmap --mlock --flash-attn > "$WORKSPACE_DIR/llama.log" 2>&1 &
+        $LLAMA_SERVER -m "$SELECTED_MODEL" --host 0.0.0.0 --port 8080 --ctx-size 8192 --reasoning off --n-gpu-layers 99 --threads 6 --threads-batch 6 --parallel 2 --cache-type-k q8_0 --cache-type-v q8_0 --no-mmap --mlock --flash-attn on > "$WORKSPACE_DIR/llama.log" 2>&1 &
         PID_LLAMA=$!
         wait $PID_LLAMA
         echo -e "\e[1;31m[Watchdog] Llama-server 異常關閉，3秒後重啟...\e[0m"

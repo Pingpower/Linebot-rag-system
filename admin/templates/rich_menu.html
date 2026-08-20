@@ -113,7 +113,7 @@
           <div class="form-section">
             <div class="form-group">
               <label for="menu_name"><span class="required">*</span> 圖文選單名稱 (Name)</label>
-              <input type="text" id="menu_name" name="name" placeholder="例：老莫可可預設選單 (限 300 字)" required>
+              <input type="text" id="menu_name" name="name" placeholder="例：官方客服預設選單 (限 300 字)" required>
               <span class="hint">僅在後台管理辨識，不會顯示給使用者。</span>
             </div>
             
@@ -549,15 +549,15 @@ document.addEventListener("DOMContentLoaded", function() {
         const type = typeSelect.value;
         if (type === "message") {
           paramLabel.textContent = "發送文字：";
-          paramInput.placeholder = "例：老莫可可營業時間";
+          paramInput.placeholder = "例：客服營業時間與地址";
           paramHint.textContent = "用戶點擊時，將於聊天室中以自己的名義發送此文字。";
         } else if (type === "postback") {
           paramLabel.textContent = "客服關鍵字：";
-          paramInput.placeholder = "例：老莫產品介紹";
+          paramInput.placeholder = "例：核心產品介紹";
           paramHint.textContent = "背景向智慧客服發送查詢，客服會直接回覆對應答案，不污染使用者視窗。";
         } else if (type === "uri") {
           paramLabel.textContent = "連結網址：";
-          paramInput.placeholder = "例：https://www.laomococoa.com.tw/";
+          paramInput.placeholder = "例：https://www.example.com/";
           paramHint.textContent = "用戶點擊時將彈出視窗並開啟此 URL 連結。";
         }
       }

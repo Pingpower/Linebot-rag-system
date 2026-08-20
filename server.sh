@@ -55,6 +55,7 @@ $HOME/文件/llama.cpp/build/bin/llama-server \
   --host 0.0.0.0 \
   --port 8080 \
   --ctx-size 8192 \
+  --reasoning off \
   --n-gpu-layers 99 \
   --threads 6 \
   --threads-batch 6 \
@@ -63,4 +64,4 @@ $HOME/文件/llama.cpp/build/bin/llama-server \
   --cache-type-v q8_0 \
   --no-mmap \
   --mlock \
-  --flash-attn
+  --flash-attn on

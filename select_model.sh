@@ -72,7 +72,7 @@ FILE_SIZE_MB=$(( FILE_SIZE_BYTES / 1048576 ))
 THREADS=6
 GPU_LAYERS=10
 CTX_SIZE=4096
-PARALLEL=2
+PARALLEL=1
 
 # 0. 判斷特定優化模型 Mai_Base
 if [[ "$M_NAME_LOWER" =~ "mai_base" ]]; then
@@ -80,7 +80,7 @@ if [[ "$M_NAME_LOWER" =~ "mai_base" ]]; then
     THREADS=6
     CTX_SIZE=4096
 # 1. 判斷是否為極小模型 (符合關鍵字或檔案大小小於 4.8 GB 即 4915 MB)
-elif [[ "$M_NAME_LOWER" =~ "gemma-4" || "$M_NAME_LOWER" =~ "4b" || "$M_NAME_LOWER" =~ "3b" || "$M_NAME_LOWER" =~ "2b" || "$M_NAME_LOWER" =~ "gemma2-2b" || "$M_NAME_LOWER" =~ "nemotron" ]] || [ "$FILE_SIZE_MB" -gt 100 ] && [ "$FILE_SIZE_MB" -lt 4915 ]; then
+elif [[ "$M_NAME_LOWER" =~ "gemma-4" || "$M_NAME_LOWER" =~ "4b" || "$M_NAME_LOWER" =~ "3b" || "$M_NAME_LOWER" =~ "2b" || "$M_NAME_LOWER" =~ "gemma2-2b" || "$M_NAME_LOWER" =~ "nemotron" ]] || [ "$FILE_SIZE_MB" -gt 100 ] && [ "$FILE_SIZE_MB" -lt 5500 ]; then
     GPU_LAYERS=99
     CTX_SIZE=4096
 # 2. 判斷是否為中等模型
@@ -100,7 +100,7 @@ if [[ "$M_NAME_LOWER" =~ "moe" || "$M_NAME_LOWER" =~ "a3b" || "$M_NAME_LOWER" =~
 fi
 EXTRA_ARGS+=("--no-mmap")
 EXTRA_ARGS+=("--mlock")
-EXTRA_ARGS+=("--flash-attn")
+EXTRA_ARGS+=("--flash-attn on")
 EXTRA_ARGS+=("--cache-type-k q8_0")
 EXTRA_ARGS+=("--cache-type-v q8_0")
 EXTRA_STR="${EXTRA_ARGS[*]}"

@@ -49,7 +49,7 @@ payload = {
             "message": {
                 "id": "12345678",
                 "type": "text",
-                "text": "如何申請屏東縣的身心障礙證明？",
+                "text": "請問你們的服務如何計費與申請？",
                 "quoteToken": "mockQuoteToken123456"
             }
         }
